@@ -38,8 +38,8 @@ they already have.
 ## Install
 
 ```
-/plugin marketplace add opencode-ai/opencode-plugin-cc
-/plugin install opencode@opencode-ai
+/plugin marketplace add https://github.com/tasict/opencode-plugin-cc.git
+/plugin install opencode@tasict-opencode-plugin-cc
 /reload-plugins
 /opencode:setup
 ```
