@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["verdict", "summary", "findings"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "needs-attention"]
+    },
+    "summary": {
+      "type": "string",
+      "description": "Terse ship/no-ship assessment."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "line_start", "line_end", "severity", "title", "body", "confidence", "recommendation"],
+        "properties": {
+          "file": { "type": "string" },
+          "line_start": { "type": "integer" },
+          "line_end": { "type": "integer" },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low"]
+          },
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "recommendation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

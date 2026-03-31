@@ -1,0 +1,11 @@
+OpenCode Plugin for Claude Code
+Copyright 2026 OpenCode Plugin Contributors
+
+This project is a tribute to and inspired by codex-plugin-cc
+(https://github.com/openai/codex-plugin-cc) by OpenAI.
+
+The architecture, plugin structure, and command patterns are derived from the
+original codex-plugin-cc project, adapted to work with OpenCode
+(https://github.com/anomalyco/opencode) instead of Codex.
+
+Licensed under the Apache License, Version 2.0.

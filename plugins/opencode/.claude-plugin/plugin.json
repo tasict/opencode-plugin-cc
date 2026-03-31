@@ -1,0 +1,7 @@
+{
+  "name": "opencode",
+  "description": "Use OpenCode from Claude Code to review code or delegate tasks.",
+  "author": {
+    "name": "OpenCode Community"
+  }
+}

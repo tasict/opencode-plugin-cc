@@ -1,0 +1,17 @@
+{
+  "name": "@opencode-ai/opencode-plugin-cc",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Use OpenCode from Claude Code to review code or delegate tasks.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  }
+}
