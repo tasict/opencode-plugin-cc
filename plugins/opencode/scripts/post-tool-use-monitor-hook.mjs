@@ -56,33 +56,41 @@ function resolveCompanionPath() {
 
 function buildMonitorScript(ids, companionPath) {
   const quoted = ids.map((id) => `"${id}"`).join(" ");
-  // The poll loop:
-  //  - reads companion status JSON per id every 30s
+  // The poll loop runs inside a Monitor child process:
+  //  - polls companion status JSON per id every 30s
   //  - emits a single line whenever status/phase changes
-  //  - exits the loop as soon as every tracked id is terminal so the
-  //    Monitor process ends cleanly; the main thread's Monitor tool sees
-  //    exit and stops spawning events.
-  //
-  // stdout is the event stream — stay selective. On terminal states we
-  // emit a `READY: <cmd>` line so Claude knows the exact command to run
-  // to fetch the full result payload.
+  //  - on terminal state, fetches `companion result <id>`, truncates to
+  //    a bounded size, and prints it as multi-line output; Monitor batches
+  //    lines within ~200ms into one notification, so the main thread
+  //    sees a single event carrying "task done + full summary" without
+  //    needing a follow-up tool call to fetch the result
+  //  - exits when every tracked id is terminal (Monitor process ends
+  //    cleanly, no runaway background poller)
   return [
     "set -u",
     `COMP=${JSON.stringify(companionPath)}`,
     `IDS=(${quoted})`,
+    "RESULT_MAX_CHARS=${OPENCODE_MONITOR_RESULT_CHARS:-1500}",
     "declare -A prev",
     'for id in "${IDS[@]}"; do prev[$id]=""; done',
     "while true; do",
     "  all_done=1",
     '  for id in "${IDS[@]}"; do',
     '    json=$(node "$COMP" status "$id" --json 2>/dev/null || printf "{}")',
-    "    st=$(printf '%s' \"$json\" | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>{try{const j=JSON.parse(s);console.log((j.job?.status||\"unknown\")+\"/\"+(j.job?.phase||\"\"))}catch(e){console.log(\"parse-err/\")}}))')",
+    "    st=$(printf '%s' \"$json\" | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>{try{const j=JSON.parse(s);console.log((j.job?.status||\"unknown\")+\"/\"+(j.job?.phase||\"\"))}catch(e){console.log(\"parse-err/\")}})')",
     '    if [ "$st" != "${prev[$id]}" ]; then',
     '      ts=$(date +%H:%M:%S)',
     '      echo "[$ts] opencode $id: ${prev[$id]:-none} → $st"',
     '      case "$st" in',
     "        completed/*|failed/*|cancelled/*)",
-    `          echo "[$ts] READY opencode $id: run \\\"node $COMP result $id\\\" to fetch the full report"`,
+    '          result=$(node "$COMP" result "$id" 2>/dev/null || true)',
+    "          # Truncate defensively so Monitor output stays bounded.",
+    '          summary=$(printf "%s" "$result" | head -c "$RESULT_MAX_CHARS")',
+    '          echo "[$ts] opencode $id TERMINAL=$st — result summary:"',
+    '          echo "--- result-begin $id ---"',
+    '          printf "%s" "$summary"',
+    '          echo ""',
+    '          echo "--- result-end $id ---"',
     "          ;;",
     "      esac",
     '      prev[$id]="$st"',
@@ -117,7 +125,7 @@ function buildReminder(ids, script) {
     "",
     "Behavior contract — follow this without being asked:",
     "1. If a Monitor is already running in this session covering other task ids, stop it (`TaskStop`) and start a new one whose IDS array is the union of all currently-running rescue task ids. One Monitor per session.",
-    "2. When a Monitor event reports a task transitioning to `completed/…`, `failed/…`, or `cancelled/…`, immediately run the `READY` line's command (`node <companion> result <task-id>`) in Bash, read the output, and surface a short summary of what the rescue task did (or failed at) to the user. Do not wait for the user to ask.",
+    "2. The Monitor script above already fetches `companion result <id>` and emits the summary inline on terminal state — each terminal event carries the full result block between `--- result-begin ---` and `--- result-end ---` markers. You do NOT need to run a follow-up Bash call to get the result; just read the Monitor event and surface a short summary of what the rescue task did (or failed at) to the user.",
     "3. If the user explicitly asked you to skip monitoring, do nothing here.",
     "</opencode-rescue-auto-monitor>",
   ].join("\n");
