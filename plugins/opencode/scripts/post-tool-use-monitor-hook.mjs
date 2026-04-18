@@ -58,44 +58,61 @@ function buildMonitorScript(ids, companionPath) {
   const quoted = ids.map((id) => `"${id}"`).join(" ");
   // The poll loop runs inside a Monitor child process:
   //  - polls companion status JSON per id every 30s
-  //  - emits a single line whenever status/phase changes
-  //  - on terminal state, fetches `companion result <id>`, truncates to
-  //    a bounded size, and prints it as multi-line output; Monitor batches
-  //    lines within ~200ms into one notification, so the main thread
-  //    sees a single event carrying "task done + full summary" without
-  //    needing a follow-up tool call to fetch the result
-  //  - exits when every tracked id is terminal (Monitor process ends
-  //    cleanly, no runaway background poller)
+  //  - emits an event when status/phase OR the latest progressPreview log
+  //    line changes, so long-running tasks surface intermediate activity
+  //  - emits a heartbeat every HEARTBEAT_POLLS ticks (default 10 = ~5min)
+  //    so the user sees signs of life even when nothing has changed
+  //  - on terminal state, fetches `companion result <id>`, truncates, and
+  //    prints a multi-line summary so the main thread gets a single batched
+  //    event carrying the full report
+  //  - exits when every tracked id is terminal
   return [
     "set -u",
     `COMP=${JSON.stringify(companionPath)}`,
     `IDS=(${quoted})`,
     "RESULT_MAX_CHARS=${OPENCODE_MONITOR_RESULT_CHARS:-1500}",
+    "HEARTBEAT_POLLS=${OPENCODE_MONITOR_HEARTBEAT_POLLS:-10}",
     "declare -A prev",
-    'for id in "${IDS[@]}"; do prev[$id]=""; done',
+    "declare -A hb",
+    'for id in "${IDS[@]}"; do prev[$id]=""; hb[$id]=0; done',
     "while true; do",
     "  all_done=1",
     '  for id in "${IDS[@]}"; do',
     '    json=$(node "$COMP" status "$id" --json 2>/dev/null || printf "{}")',
-    "    st=$(printf '%s' \"$json\" | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>{try{const j=JSON.parse(s);console.log((j.job?.status||\"unknown\")+\"/\"+(j.job?.phase||\"\"))}catch(e){console.log(\"parse-err/\")}})')",
-    '    if [ "$st" != "${prev[$id]}" ]; then',
+    "    fields=$(printf '%s' \"$json\" | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>{try{const j=JSON.parse(s);const jb=j.job||{};const prog=String(jb.progressPreview||\"\").split(\"\\n\").filter(Boolean);const last=(prog[prog.length-1]||\"\").replace(/[|\\r\\n]/g,\" \").slice(0,200);process.stdout.write([jb.status||\"unknown\",jb.phase||\"\",jb.elapsed||\"\",last].join(\"|\"))}catch(e){process.stdout.write(\"parse-err|||\")}})')",
+    "    IFS='|' read -r st phase elapsed last <<< \"$fields\"",
+    '    sig="${st}/${phase}|${last}"',
+    '    if [ "$sig" != "${prev[$id]}" ]; then',
     '      ts=$(date +%H:%M:%S)',
-    '      echo "[$ts] opencode $id: ${prev[$id]:-none} → $st"',
-    '      case "$st" in',
-    "        completed/*|failed/*|cancelled/*)",
-    '          result=$(node "$COMP" result "$id" 2>/dev/null || true)',
-    "          # Truncate defensively so Monitor output stays bounded.",
-    '          summary=$(printf "%s" "$result" | head -c "$RESULT_MAX_CHARS")',
-    '          echo "[$ts] opencode $id TERMINAL=$st — result summary:"',
-    '          echo "--- result-begin $id ---"',
-    '          printf "%s" "$summary"',
-    '          echo ""',
-    '          echo "--- result-end $id ---"',
-    "          ;;",
-    "      esac",
-    '      prev[$id]="$st"',
+    '      if [ -n "$last" ]; then',
+    '        echo "[$ts] opencode $id: $st/$phase (elapsed $elapsed) — $last"',
+    "      else",
+    '        echo "[$ts] opencode $id: $st/$phase (elapsed $elapsed)"',
+    "      fi",
+    '      prev[$id]="$sig"',
+    "      hb[$id]=0",
+    "    else",
+    '      hb[$id]=$(( ${hb[$id]} + 1 ))',
+    '      if [ "${hb[$id]}" -ge "$HEARTBEAT_POLLS" ]; then',
+    '        ts=$(date +%H:%M:%S)',
+    '        echo "[$ts] opencode $id: heartbeat — still $st/$phase (elapsed $elapsed)"',
+    "        hb[$id]=0",
+    "      fi",
     "    fi",
-    '    case "$st" in completed/*|failed/*|cancelled/*) ;; *) all_done=0 ;; esac',
+    '    case "$st" in',
+    "      completed|failed|cancelled)",
+    '        result=$(node "$COMP" result "$id" 2>/dev/null || true)',
+    "        # Truncate defensively so Monitor output stays bounded.",
+    '        summary=$(printf "%s" "$result" | head -c "$RESULT_MAX_CHARS")',
+    '        ts=$(date +%H:%M:%S)',
+    '        echo "[$ts] opencode $id TERMINAL=$st — result summary:"',
+    '        echo "--- result-begin $id ---"',
+    '        printf "%s" "$summary"',
+    '        echo ""',
+    '        echo "--- result-end $id ---"',
+    "        ;;",
+    '      *) all_done=0 ;;',
+    "    esac",
     "  done",
     "  if [ $all_done -eq 1 ]; then",
     "    echo \"[$(date +%H:%M:%S)] opencode: all tracked tasks terminal — exiting monitor\"",
