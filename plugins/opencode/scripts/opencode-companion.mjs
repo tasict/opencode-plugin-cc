@@ -510,6 +510,26 @@ async function handleStatus(argv) {
 
   const snapshot = buildStatusSnapshot(jobs, workspace, { sessionId: sessionFilter });
 
+  // Enrich running jobs with a live breadcrumb from the opencode session —
+  // gives newcomers a human-legible "running — bash: docker exec ..." line
+  // instead of a stale "investigating" phase from state.json. Runs in parallel
+  // and gracefully falls back if the server is unreachable.
+  if (snapshot.running.length > 0) {
+    const baseUrl = "http://127.0.0.1:4096";
+    await Promise.all(snapshot.running.map(async (job) => {
+      if (!job.opencodeSessionId) return;
+      const act = await getSessionLastActivity(baseUrl, job.opencodeSessionId);
+      if (!act) return;
+      const age = act.ageSec != null ? `${act.ageSec}s ago` : "";
+      if (act.kind === "tool") {
+        const head = act.command ? `: ${act.command}` : "";
+        job.breadcrumb = `running — ${act.tool}${head}${age ? ` (${age})` : ""}`.trim();
+      } else if (act.kind === "text") {
+        job.breadcrumb = `running — "${act.text}"${age ? ` (${age})` : ""}`;
+      }
+    }));
+  }
+
   if (wantJson) {
     // Machine-readable shape mirrors the single-task case so callers can treat
     // both uniformly: a `.job` field is present for single-task, otherwise
