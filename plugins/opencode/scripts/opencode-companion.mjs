@@ -19,6 +19,7 @@ import { renderStatus, renderResult, renderReview, renderSetup } from "./lib/ren
 import { buildReviewPrompt, buildTaskPrompt } from "./lib/prompts.mjs";
 import { getDiff, getStatus as getGitStatus } from "./lib/git.mjs";
 import { readJson } from "./lib/fs.mjs";
+import { autoHealJob, autoHealJobs } from "./lib/auto-heal.mjs";
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
 
@@ -38,6 +39,7 @@ const handlers = {
   status: handleStatus,
   result: handleResult,
   cancel: handleCancel,
+  heal: handleHeal,
 };
 
 const handler = handlers[subcommand];
@@ -397,8 +399,19 @@ async function handleTaskResumeCandidate(argv) {
   const { options } = parseArgs(argv, { booleanOptions: ["json"] });
 
   const workspace = await resolveWorkspace();
-  const state = loadState(workspace);
+  let state = loadState(workspace);
   const sessionId = getClaudeSessionId();
+
+  // Heal first so "latest completed" reflects session reality, not a stale
+  // "running" flag from a dead worker.
+  const healable = (state.jobs ?? []).filter(
+    (j) => j.type === "task" && j.opencodeSessionId &&
+      ["starting", "investigating", "running", "finalizing"].includes(j.status),
+  );
+  if (healable.length > 0) {
+    await autoHealJobs(workspace, healable);
+    state = loadState(workspace);
+  }
 
   const lastTask = state.jobs
     ?.filter((j) => j.type === "task" && j.opencodeSessionId)
@@ -429,8 +442,18 @@ async function handleStatus(argv) {
   });
 
   const workspace = await resolveWorkspace();
-  const state = loadState(workspace);
+  let state = loadState(workspace);
   const sessionId = getClaudeSessionId();
+  // Auto-heal stuck jobs before building the snapshot so `status` never lies
+  // about completion. Safe on ECONNREFUSED (probe returns reachable:false).
+  const healable = (state.jobs ?? []).filter(
+    (j) => j.opencodeSessionId &&
+      ["starting", "investigating", "running", "finalizing"].includes(j.status),
+  );
+  if (healable.length > 0) {
+    await autoHealJobs(workspace, healable);
+    state = loadState(workspace);
+  }
   const jobs = state.jobs ?? [];
   const wantJson = !!options.json;
   // --all widens the snapshot filter to every session's jobs; without --all we
@@ -486,7 +509,18 @@ async function handleResult(argv) {
   const ref = positional[0];
 
   const workspace = await resolveWorkspace();
-  const state = loadState(workspace);
+  let state = loadState(workspace);
+  // Auto-heal before resolving so that if the caller asks for the latest
+  // result, we don't return "no finished job" while a silently-completed
+  // session is waiting to be reconciled.
+  const healable = (state.jobs ?? []).filter(
+    (j) => j.opencodeSessionId &&
+      ["starting", "investigating", "running", "finalizing"].includes(j.status),
+  );
+  if (healable.length > 0) {
+    await autoHealJobs(workspace, healable);
+    state = loadState(workspace);
+  }
 
   const { job, ambiguous } = resolveResultJob(state.jobs ?? [], ref);
 
@@ -555,6 +589,56 @@ async function handleCancel(argv) {
   });
 
   console.log(`Canceled job: ${job.id}`);
+}
+
+// ------------------------------------------------------------------
+// Heal (batch auto-reconcile stuck jobs)
+// ------------------------------------------------------------------
+
+async function handleHeal(argv) {
+  const { options } = parseArgs(argv ?? [], {
+    booleanOptions: ["json", "dry-run", "all"],
+  });
+
+  const workspace = await resolveWorkspace();
+  const state = loadState(workspace);
+  const sessionId = getClaudeSessionId();
+  const dryRun = !!options["dry-run"];
+
+  let jobs = state.jobs ?? [];
+  if (!options.all && sessionId) {
+    jobs = jobs.filter((j) => !j.sessionId || j.sessionId === sessionId);
+  }
+
+  const healable = jobs.filter(
+    (j) => j.opencodeSessionId &&
+      ["starting", "investigating", "running", "finalizing"].includes(j.status),
+  );
+
+  const { actions } = await autoHealJobs(workspace, healable, { dryRun });
+
+  if (options.json) {
+    console.log(JSON.stringify({
+      workspaceRoot: workspace,
+      dryRun,
+      scanned: healable.length,
+      actions,
+    }, null, 2));
+    return;
+  }
+
+  console.log(`## Auto-Heal ${dryRun ? "(dry-run)" : ""}\n`);
+  console.log(`- Workspace: ${workspace}`);
+  console.log(`- Scanned stuck jobs: ${healable.length}`);
+  if (actions.length === 0) {
+    console.log(`- No actions needed.`);
+    return;
+  }
+  console.log(`- Actions: ${actions.length}\n`);
+  for (const a of actions) {
+    const det = a.details ? ` — ${JSON.stringify(a.details)}` : "";
+    console.log(`- **${a.id}**: ${a.action}${det}`);
+  }
 }
 
 // ------------------------------------------------------------------

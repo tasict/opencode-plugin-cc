@@ -101,6 +101,33 @@ To check your configured providers:
 
 When enabled via `/opencode:setup --enable-review-gate`, a Stop hook runs a targeted OpenCode review on Claude's response. If issues are found, the stop is blocked so Claude can address them first. Warning: can create long-running loops and drain usage limits.
 
+## Job Auto-Heal
+
+Long-running tasks spawned via `/opencode:task --background` occasionally get
+stuck in `investigating` status even after the OpenCode session has finished
+server-side — typically because `POST /session/:id/message` fails to close its
+HTTP body, the task-worker is killed, or the companion's watcher misses the
+terminal signal.
+
+The companion now reconciles this automatically:
+
+- `companion.mjs status` and `companion.mjs result` run a silent auto-heal
+  pass before they read state, so they never report a false "running" state
+  for a session that is actually complete.
+- `companion.mjs heal` scans for stuck jobs and reconciles them in bulk. Pass
+  `--dry-run` to preview, `--json` for machine-readable output, and `--all`
+  to include jobs from other Claude sessions.
+
+Each heal check queries `GET /session/:id/message?limit=1`. If the last
+assistant message has `info.finish` set and `info.time.completed >= job.startedAt`,
+the job is transitioned to `completed` and the message text is persisted to
+the job data file. If the task-worker PID is dead and the session has been
+silent for >60 s, the job is transitioned to `failed` with a clear reason.
+
+If the OpenCode server is unreachable, auto-heal is a no-op — status/result
+commands still work, they just can't move stuck jobs forward until the server
+comes back.
+
 ## Troubleshooting
 
 <details>
