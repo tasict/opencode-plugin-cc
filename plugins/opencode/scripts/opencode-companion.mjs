@@ -19,7 +19,10 @@ import { renderStatus, renderResult, renderReview, renderSetup } from "./lib/ren
 import { buildReviewPrompt, buildTaskPrompt } from "./lib/prompts.mjs";
 import { getDiff, getStatus as getGitStatus } from "./lib/git.mjs";
 import { readJson } from "./lib/fs.mjs";
-import { autoHealJob, autoHealJobs } from "./lib/auto-heal.mjs";
+import { autoHealJob, autoHealJobs, getSessionLastActivity } from "./lib/auto-heal.mjs";
+import { ensureOpencodeConfig, readOpencodeConfig, missingPermissions, resolveConfigPath } from "./lib/opencode-config.mjs";
+import { stateRoot } from "./lib/state.mjs";
+import { runCommand } from "./lib/process.mjs";
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
 
@@ -40,6 +43,8 @@ const handlers = {
   result: handleResult,
   cancel: handleCancel,
   heal: handleHeal,
+  doctor: handleDoctor,
+  config: handleConfig,
 };
 
 const handler = handlers[subcommand];
@@ -690,6 +695,223 @@ function extractResponseText(response) {
   }
 
   return JSON.stringify(response, null, 2);
+}
+
+// ------------------------------------------------------------------
+// Doctor (onboarding self-test + optional auto-repair)
+// ------------------------------------------------------------------
+
+async function handleDoctor(argv) {
+  const { options } = parseArgs(argv ?? [], {
+    booleanOptions: ["json", "fix", "verbose"],
+  });
+  const fix = !!options.fix;
+  const wantJson = !!options.json;
+  const verbose = !!options.verbose;
+  const IS_WINDOWS = process.platform === "win32";
+
+  const checks = [];
+  const push = (name, status, detail, hint) => checks.push({ name, status, detail, hint });
+
+  // 1. opencode binary in PATH
+  const which = await runCommand("which", ["opencode"]).catch(() => ({ exitCode: 1, stdout: "" }));
+  if (which.exitCode === 0 && which.stdout.trim()) {
+    push("opencode-binary", "PASS", which.stdout.trim(), null);
+  } else {
+    push("opencode-binary", "FAIL", "not in PATH",
+      "Install: npm i -g opencode-ai  OR  brew install opencode");
+  }
+
+  // 2. opencode version
+  const ver = await runCommand("opencode", ["--version"]).catch(() => ({ exitCode: 1, stdout: "" }));
+  if (ver.exitCode === 0) {
+    push("opencode-version", "PASS", ver.stdout.trim() || "(unknown)", null);
+  } else {
+    push("opencode-version", "WARN", "could not resolve version", null);
+  }
+
+  // 3. opencode.json permissions (HEADLESS-SAFE — biggest footgun)
+  const cfg = readOpencodeConfig();
+  const missing = missingPermissions(cfg.data);
+  if (cfg.exists && missing.length === 0) {
+    push("opencode-config", "PASS", `${cfg.path} (all permissions allow)`, null);
+  } else {
+    const detail = cfg.exists
+      ? `${cfg.path} — missing: ${missing.join(", ")}`
+      : `${cfg.path} — file missing`;
+    if (fix) {
+      const r = ensureOpencodeConfig({ silent: true });
+      push("opencode-config", r.changed ? "PASS" : "WARN",
+        r.changed ? `fixed: ${r.path}` : detail, null);
+    } else {
+      push("opencode-config", "FAIL", detail,
+        "Run with --fix (or set: permission.{bash,edit,webfetch,external_directory} = \"allow\")");
+    }
+  }
+
+  // 4. server reachable
+  const serverUrl = "http://127.0.0.1:4096";
+  let reachable = false;
+  try {
+    const r = await fetch(`${serverUrl}/global/health`, { signal: AbortSignal.timeout(2000) });
+    reachable = r.ok;
+  } catch {
+    reachable = false;
+  }
+  if (reachable) {
+    push("opencode-server", "PASS", `${serverUrl} reachable`, null);
+  } else {
+    push("opencode-server", "WARN", `${serverUrl} not reachable`,
+      "Start it: opencode serve --port 4096 &");
+  }
+
+  // 5. CLAUDE_PLUGIN_DATA sanity check
+  const envData = process.env.CLAUDE_PLUGIN_DATA;
+  if (envData && !/opencode/i.test(path.basename(envData))) {
+    push("plugin-data-env", "WARN",
+      `CLAUDE_PLUGIN_DATA=${envData} — basename lacks "opencode"`,
+      "State will self-derive from script path; env is ignored to avoid cross-plugin leak.");
+  } else {
+    push("plugin-data-env", "PASS", envData ? envData : "(unset — self-derived)", null);
+  }
+
+  // 6. resolved state dir
+  const workspace = await resolveWorkspace();
+  const sRoot = stateRoot(workspace);
+  push("state-dir", "PASS", sRoot, null);
+
+  // 7. stuck jobs for this workspace
+  const state = loadState(workspace);
+  const sessionId = getClaudeSessionId();
+  const jobs = (state.jobs ?? []).filter((j) => !sessionId || j.sessionId === sessionId);
+  const healable = jobs.filter(
+    (j) => j.opencodeSessionId &&
+      ["starting", "investigating", "running", "finalizing"].includes(j.status),
+  );
+  if (healable.length === 0) {
+    push("stuck-jobs", "PASS", "none", null);
+  } else if (fix) {
+    const { actions } = await autoHealJobs(workspace, healable);
+    push("stuck-jobs", "PASS", `healed ${actions.length}/${healable.length}`, null);
+  } else {
+    push("stuck-jobs", "WARN", `${healable.length} in non-terminal state`,
+      "Run: companion heal  (or companion doctor --fix)");
+  }
+
+  // 8. disk free on state-dir parent
+  if (IS_WINDOWS) {
+    push("disk-free", "PASS", "N/A (Windows)", null);
+  } else {
+    // Walk up to the first existing ancestor — stateRoot may not exist yet.
+    let probe = sRoot;
+    while (probe && probe !== "/" && !fs.existsSync(probe)) probe = path.dirname(probe);
+    const df = await runCommand("df", ["-h", probe]).catch(() => ({ exitCode: 1, stdout: "" }));
+    const lines = (df.stdout || "").split("\n").filter(Boolean);
+    const last = lines[lines.length - 1] || "";
+    if (last && last !== lines[0]) {
+      push("disk-free", "PASS", last.split(/\s+/).slice(0, 5).join(" "), null);
+    } else {
+      push("disk-free", "WARN", "df unavailable", null);
+    }
+  }
+
+  // Summary
+  const nFail = checks.filter((c) => c.status === "FAIL").length;
+  const nWarn = checks.filter((c) => c.status === "WARN").length;
+  const summary = nFail + nWarn === 0
+    ? "All good"
+    : `${nWarn} warnings, ${nFail} failures${!fix ? " — run with --fix to repair" : ""}`;
+
+  if (wantJson) {
+    console.log(JSON.stringify({
+      summary: { failures: nFail, warnings: nWarn, fix },
+      checks,
+      workspace,
+      stateRoot: sRoot,
+    }, null, 2));
+    return;
+  }
+
+  // Compact text output — ~1 line per check
+  for (const c of checks) {
+    const tag = c.status === "PASS" ? "PASS" : c.status === "WARN" ? "WARN" : "FAIL";
+    console.log(`[${tag}] ${c.name} — ${c.detail}`);
+    if (verbose && c.hint) console.log(`       ${c.hint}`);
+    else if (c.status !== "PASS" && c.hint) console.log(`       ${c.hint}`);
+  }
+  console.log(`\n${nFail + nWarn === 0 ? "OK" : "!! "} ${summary}`);
+  if (nFail > 0 && !fix) process.exit(1);
+}
+
+// ------------------------------------------------------------------
+// Config (resolved settings dump — easier onboarding than reading source)
+// ------------------------------------------------------------------
+
+async function handleConfig(argv) {
+  const { options } = parseArgs(argv ?? [], { booleanOptions: ["json"] });
+  const wantJson = !!options.json;
+
+  const envSpec = [
+    ["OPENCODE_REQUEST_TIMEOUT_MS", "1800000", "Per-HTTP-request abort timeout"],
+    ["OPENCODE_PROMPT_TIMEOUT_MS",  "14400000", "sendPrompt absolute cap (race against server 5min body-close)"],
+    ["OPENCODE_IDLE_TIMEOUT_MS",    "900000", "Session idle watchdog (no activity → abort)"],
+    ["OPENCODE_PGREP_MISS_THRESHOLD","3", "Consecutive pgrep-misses before declaring bash tool stuck"],
+    ["OPENCODE_COMPLETION_POLL_MS", "5000", "Watcher poll interval during sendPrompt"],
+    ["OPENCODE_MONITOR_RESULT_CHARS","(hook)", "Monitor hook: max chars per tool-result snippet"],
+    ["OPENCODE_MONITOR_HEARTBEAT_POLLS","(hook)", "Monitor hook: polls between heartbeat pings"],
+    ["OPENCODE_COMPANION_DATA",     "(self-derived)", "Override for plugin data dir"],
+    ["OPENCODE_SERVER_PASSWORD",    "(unset)", "HTTP Basic auth password"],
+    ["OPENCODE_SERVER_USERNAME",    "opencode", "HTTP Basic auth username"],
+  ];
+  const envRows = envSpec.map(([name, dflt, desc]) => {
+    const v = process.env[name];
+    return {
+      name,
+      value: v != null ? v : dflt,
+      source: v != null ? "env" : (dflt.startsWith("(") ? "default" : "default"),
+      description: desc,
+    };
+  });
+
+  const workspace = await resolveWorkspace();
+  const sRoot = stateRoot(workspace);
+  const cfg = readOpencodeConfig();
+  const missing = missingPermissions(cfg.data);
+  const serverUrl = "http://127.0.0.1:4096";
+  let serverReachable = false;
+  try {
+    const r = await fetch(`${serverUrl}/global/health`, { signal: AbortSignal.timeout(2000) });
+    serverReachable = r.ok;
+  } catch {}
+
+  const out = {
+    env: envRows,
+    workspace,
+    stateRoot: sRoot,
+    opencodeConfig: {
+      path: cfg.path,
+      exists: cfg.exists,
+      permissionsOk: missing.length === 0,
+      missing,
+    },
+    server: { url: serverUrl, reachable: serverReachable },
+  };
+
+  if (wantJson) {
+    console.log(JSON.stringify(out, null, 2));
+    return;
+  }
+
+  console.log("## OpenCode Companion Config\n");
+  console.log(`- Workspace: ${workspace}`);
+  console.log(`- State dir: ${sRoot}`);
+  console.log(`- Config file: ${cfg.path} (${cfg.exists ? "exists" : "missing"}${missing.length ? ", missing: " + missing.join(",") : ", permissions OK"})`);
+  console.log(`- Server: ${serverUrl} (${serverReachable ? "reachable" : "unreachable"})`);
+  console.log("\n### Environment variables\n");
+  for (const r of envRows) {
+    const src = r.source === "env" ? "env" : "default";
+    console.log(`- ${r.name} = ${r.value} [${src}] — ${r.description}`);
+  }
 }
 
 /**

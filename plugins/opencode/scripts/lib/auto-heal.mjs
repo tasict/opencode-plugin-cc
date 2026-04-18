@@ -133,6 +133,66 @@ export async function probeSessionTerminal(baseUrl, sessionId, startedAtMs, head
 }
 
 /**
+ * Fetch the session's last activity summary for display in `status` output.
+ * Never throws — returns null on any failure (unreachable, bad response).
+ *
+ * Return shape:
+ *   null                                         — server unreachable / no info
+ *   { kind:"tool", tool, command, ageSec }       — last part is a tool call
+ *   { kind:"text", text, ageSec }                — last part is text
+ *   { kind:"none", ageSec }                      — session has info but empty parts
+ *
+ * @param {string} baseUrl
+ * @param {string} sessionId
+ * @returns {Promise<object|null>}
+ */
+export async function getSessionLastActivity(baseUrl, sessionId) {
+  if (!sessionId) return null;
+  const h = buildHeaders();
+  try {
+    const res = await fetch(`${baseUrl}/session/${sessionId}/message?limit=1`, {
+      method: "GET",
+      headers: h,
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const arr = await res.json();
+    const last = Array.isArray(arr) ? arr[arr.length - 1] : null;
+    if (!last) return null;
+    const info = last.info;
+    const parts = Array.isArray(last.parts) ? last.parts : [];
+
+    const updatedMs = Math.max(
+      typeof info?.time?.completed === "number" ? info.time.completed : 0,
+      typeof info?.time?.created === "number" ? info.time.created : 0,
+    );
+    const ageSec = updatedMs ? Math.max(0, Math.floor((Date.now() - updatedMs) / 1000)) : null;
+
+    // Walk backwards to find the most recent meaningful part.
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const p = parts[i];
+      if (!p) continue;
+      if (p.type === "tool") {
+        const tool = p.tool || "tool";
+        let command = "";
+        const input = p.state?.input || p.input || {};
+        if (tool === "bash") command = String(input.command || input.cmd || "");
+        else if (tool === "edit" || tool === "write") command = String(input.filePath || input.file_path || input.path || "");
+        else if (tool === "read") command = String(input.filePath || input.file_path || input.path || "");
+        else command = JSON.stringify(input).slice(0, 120);
+        return { kind: "tool", tool, command: command.slice(0, 80), ageSec };
+      }
+      if (p.type === "text" && typeof p.text === "string" && p.text.trim()) {
+        return { kind: "text", text: p.text.trim().slice(0, 80), ageSec };
+      }
+    }
+    return { kind: "none", ageSec };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Parse an ISO-ish timestamp that might be a number or string. Returns epoch ms, or 0.
  */
 function toEpochMs(v) {
