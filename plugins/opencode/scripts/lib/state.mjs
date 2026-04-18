@@ -4,20 +4,66 @@
 
 import crypto from "node:crypto";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ensureDir, readJson, writeJson } from "./fs.mjs";
 
 const MAX_JOBS = 50;
 
 /**
+ * Derive the opencode-companion's own plugin data directory from the script's
+ * install path. Claude Code installs plugins at
+ *   <root>/plugins/cache/<owner>-<repo>/<plugin>/<version>/scripts/lib/state.mjs
+ * and assigns per-plugin data at
+ *   <root>/plugins/data/<plugin>-<owner>-<repo>/
+ * If CLAUDE_PLUGIN_DATA is exported by an UNRELATED plugin (e.g. codex
+ * companion), env-based lookup would leak opencode state into that plugin's
+ * data dir. Deriving our own path avoids that cross-contamination.
+ *
+ * Returns null if the path layout doesn't match (e.g. running from repo source).
+ */
+function deriveOwnDataDir() {
+  try {
+    const here = fileURLToPath(import.meta.url);
+    const parts = here.split(path.sep);
+    const cacheIdx = parts.lastIndexOf("cache");
+    if (cacheIdx < 1 || cacheIdx + 4 >= parts.length) return null;
+    const ownerRepo = parts[cacheIdx + 1];
+    const pluginName = parts[cacheIdx + 2];
+    const rootBase = parts.slice(0, cacheIdx).join(path.sep);
+    return path.join(rootBase, "data", `${pluginName}-${ownerRepo}`);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Compute the state directory root for a workspace.
+ *
+ * Priority:
+ *   1. Explicit opt-in via OPENCODE_COMPANION_DATA (per-plugin override)
+ *   2. Self-derived path from script location (correct under normal install)
+ *   3. Only trust CLAUDE_PLUGIN_DATA when it already names our own plugin —
+ *      otherwise ignore it (another plugin may have exported it into our env)
+ *   4. Fallback: /tmp/opencode-companion
+ *
  * @param {string} workspacePath
  * @returns {string}
  */
 export function stateRoot(workspacePath) {
-  const base =
-    process.env.CLAUDE_PLUGIN_DATA
-      ? path.join(process.env.CLAUDE_PLUGIN_DATA, "state")
-      : path.join("/tmp", "opencode-companion");
+  let base;
+  if (process.env.OPENCODE_COMPANION_DATA) {
+    base = path.join(process.env.OPENCODE_COMPANION_DATA, "state");
+  } else {
+    const own = deriveOwnDataDir();
+    const envData = process.env.CLAUDE_PLUGIN_DATA;
+    if (own) {
+      base = path.join(own, "state");
+    } else if (envData && /opencode/i.test(path.basename(envData))) {
+      base = path.join(envData, "state");
+    } else {
+      base = path.join("/tmp", "opencode-companion");
+    }
+  }
   const hash = crypto.createHash("sha256").update(workspacePath).digest("hex").slice(0, 16);
   return path.join(base, hash);
 }
