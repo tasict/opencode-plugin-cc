@@ -8,6 +8,8 @@ import { spawn, spawnSync } from "node:child_process";
 // in auto-heal.mjs because it is tightly coupled to heal-decision logic, but
 // conceptually it is a server probe.
 export { probeSessionTerminal } from "./auto-heal.mjs";
+import { ensureOpencodeConfig } from "./opencode-config.mjs";
+import { classifyError } from "./errors.mjs";
 
 const DEFAULT_PORT = 4096;
 const DEFAULT_HOST = "127.0.0.1";
@@ -114,6 +116,14 @@ export async function ensureServer(opts = {}) {
     return { url, alreadyRunning: true };
   }
 
+  // Self-heal permissions BEFORE spawning the server. The running daemon reads
+  // opencode.json at startup; fixing it after the spawn would require a restart.
+  try {
+    ensureOpencodeConfig();
+  } catch (err) {
+    process.stderr.write(`[opencode-companion] ensureOpencodeConfig failed: ${err.message}\n`);
+  }
+
   // Start the server
   const proc = spawn("opencode", ["serve", "--port", String(port)], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -155,15 +165,24 @@ export function createClient(baseUrl, opts = {}) {
   }
 
   async function request(method, path, body) {
-    const res = await fetch(`${baseUrl}${path}`, {
-      method,
-      headers,
-      body: body != null ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    const startedAt = Date.now();
+    let res;
+    try {
+      res = await fetch(`${baseUrl}${path}`, {
+        method,
+        headers,
+        body: body != null ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw classifyError(err, { baseUrl, startedAt, timeoutMs: REQUEST_TIMEOUT_MS, op: `request ${method} ${path}` });
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`OpenCode API ${method} ${path} returned ${res.status}: ${text}`);
+      throw classifyError(
+        new Error(`OpenCode API ${method} ${path} returned ${res.status}: ${text}`),
+        { baseUrl, startedAt, timeoutMs: REQUEST_TIMEOUT_MS, op: `request ${method} ${path}` },
+      );
     }
     const ct = res.headers.get("content-type") ?? "";
     if (ct.includes("application/json")) {
@@ -394,7 +413,13 @@ export function createClient(baseUrl, opts = {}) {
         if (second.ok) return second.data;
         // Both failed — surface the more informative error. Prefer the
         // fetch error because it usually has the HTTP status/body.
-        throw first.via === "fetch" ? first.err : second.err;
+        const rawErr = first.via === "fetch" ? first.err : second.err;
+        throw classifyError(rawErr, {
+          baseUrl,
+          startedAt,
+          timeoutMs: PROMPT_TIMEOUT_MS,
+          op: "sendPrompt",
+        });
       } finally {
         clearTimeout(timeoutId);
       }
