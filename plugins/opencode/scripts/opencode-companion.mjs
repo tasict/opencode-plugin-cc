@@ -13,7 +13,7 @@ import { isOpencodeInstalled, getOpencodeVersion, spawnDetached } from "./lib/pr
 import { isServerRunning, ensureServer, createClient, connect } from "./lib/opencode-server.mjs";
 import { resolveWorkspace } from "./lib/workspace.mjs";
 import { loadState, updateState, upsertJob, generateJobId, jobDataPath } from "./lib/state.mjs";
-import { buildStatusSnapshot, resolveResultJob, resolveCancelableJob, enrichJob } from "./lib/job-control.mjs";
+import { buildStatusSnapshot, resolveResultJob, resolveCancelableJob, enrichJob, matchJobReference } from "./lib/job-control.mjs";
 import { createJobRecord, runTrackedJob, getClaudeSessionId } from "./lib/tracked-jobs.mjs";
 import { renderStatus, renderResult, renderReview, renderSetup } from "./lib/render.mjs";
 import { buildReviewPrompt, buildTaskPrompt } from "./lib/prompts.mjs";
@@ -424,11 +424,60 @@ async function handleTaskResumeCandidate(argv) {
 // ------------------------------------------------------------------
 
 async function handleStatus(argv) {
+  const { options, positional } = parseArgs(argv ?? [], {
+    booleanOptions: ["json", "all"],
+  });
+
   const workspace = await resolveWorkspace();
   const state = loadState(workspace);
   const sessionId = getClaudeSessionId();
+  const jobs = state.jobs ?? [];
+  const wantJson = !!options.json;
+  // --all widens the snapshot filter to every session's jobs; without --all we
+  // still filter to the current Claude session for the existing markdown UX.
+  const sessionFilter = options.all ? undefined : sessionId;
+  const ref = positional?.[0];
 
-  const snapshot = buildStatusSnapshot(state.jobs ?? [], workspace, { sessionId });
+  // Single-task query — `status <tid> [--json]`.
+  if (ref) {
+    const { job, ambiguous } = matchJobReference(jobs, ref);
+    if (ambiguous) {
+      if (wantJson) {
+        console.log(JSON.stringify({ workspaceRoot: workspace, job: null, error: "ambiguous" }));
+      } else {
+        console.error(`Ambiguous job reference "${ref}". Please provide a more specific ID prefix.`);
+      }
+      process.exit(ambiguous ? 2 : 0);
+      return;
+    }
+    if (wantJson) {
+      const enriched = job ? enrichJob(job, workspace) : null;
+      console.log(JSON.stringify({ workspaceRoot: workspace, job: enriched }));
+      return;
+    }
+    if (!job) {
+      console.log(`No job found for "${ref}" in workspace ${workspace}.`);
+      return;
+    }
+    console.log(renderStatus({ running: [], latestFinished: null, recent: [enrichJob(job, workspace)] }));
+    return;
+  }
+
+  const snapshot = buildStatusSnapshot(jobs, workspace, { sessionId: sessionFilter });
+
+  if (wantJson) {
+    // Machine-readable shape mirrors the single-task case so callers can treat
+    // both uniformly: a `.job` field is present for single-task, otherwise
+    // `.running`/`.recent` arrays describe the whole workspace snapshot.
+    console.log(JSON.stringify({
+      workspaceRoot: workspace,
+      running: snapshot.running,
+      latestFinished: snapshot.latestFinished,
+      recent: snapshot.recent,
+    }));
+    return;
+  }
+
   console.log(renderStatus(snapshot));
 }
 
