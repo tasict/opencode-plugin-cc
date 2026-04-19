@@ -12,7 +12,7 @@ import { parseArgs, extractTaskText } from "./lib/args.mjs";
 import { isOpencodeInstalled, getOpencodeVersion, spawnDetached } from "./lib/process.mjs";
 import { isServerRunning, ensureServer, createClient, connect } from "./lib/opencode-server.mjs";
 import { resolveWorkspace } from "./lib/workspace.mjs";
-import { loadState, updateState, upsertJob, generateJobId, jobDataPath } from "./lib/state.mjs";
+import { loadState, updateState, upsertJob, generateJobId, jobDataPath, jobLogPath } from "./lib/state.mjs";
 import { buildStatusSnapshot, resolveResultJob, resolveCancelableJob, enrichJob, matchJobReference } from "./lib/job-control.mjs";
 import { createJobRecord, runTrackedJob, getClaudeSessionId } from "./lib/tracked-jobs.mjs";
 import { renderStatus, renderResult, renderReview, renderSetup } from "./lib/render.mjs";
@@ -268,6 +268,22 @@ async function handleTask(argv) {
 
   // Background mode: spawn a detached worker
   if (options.background) {
+    const logFile = jobLogPath(workspace, job.id);
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    upsertJob(workspace, {
+      id: job.id,
+      status: "queued",
+      phase: "queued",
+      logFile,
+      request: {
+        taskText,
+        agentName,
+        isWrite,
+        resumeSessionId,
+        model: options.model,
+      },
+    });
+
     const workerArgs = [
       path.join(PLUGIN_ROOT, "scripts", "opencode-companion.mjs"),
       "task-worker",
@@ -280,7 +296,8 @@ async function handleTask(argv) {
     if (resumeSessionId) workerArgs.push("--resume-session", resumeSessionId);
     if (options.model) workerArgs.push("--model", options.model);
 
-    spawnDetached("node", workerArgs, { cwd: workspace });
+    const child = spawnDetached("node", workerArgs, { cwd: workspace, logFile });
+    upsertJob(workspace, { id: job.id, pid: child.pid });
     console.log(`OpenCode task started in background: ${job.id}`);
     console.log("Check `/opencode:status` for progress.");
     return;
