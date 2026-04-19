@@ -338,22 +338,20 @@ export function createClient(baseUrl, opts = {}) {
               // platforms (Windows).
               const idleMs = Date.now() - lastActivityMs;
               if (idleMs > IDLE_TIMEOUT_MS) {
-                if (opencodePid) {
-                  const childCount = countChildren(opencodePid);
-                  if (childCount > 0) {
-                    lastActivityMs = Date.now();
-                    process.stderr.write(
-                      `opencode watcher: session idle ${Math.floor(idleMs / 1000)}s, but opencode serve (pid ${opencodePid}) has ${childCount} child process(es); continuing\n`,
-                    );
-                    continue;
-                  }
+                const liveChildren = opencodePid ? countChildren(opencodePid) : 0;
+                if (liveChildren > 0) {
+                  lastActivityMs = Date.now();
+                  process.stderr.write(
+                    `opencode watcher: session idle ${Math.floor(idleMs / 1000)}s, but opencode serve (pid ${opencodePid}) has ${liveChildren} child process(es); continuing\n`,
+                  );
+                } else {
+                  ac.abort(
+                    new Error(
+                      `session idle ${Math.floor(idleMs / 1000)}s > ${IDLE_TIMEOUT_MS / 1000}s`,
+                    ),
+                  );
+                  throw new Error("session idle timeout");
                 }
-                ac.abort(
-                  new Error(
-                    `session idle ${Math.floor(idleMs / 1000)}s > ${IDLE_TIMEOUT_MS / 1000}s`,
-                  ),
-                );
-                throw new Error("session idle timeout");
               }
             }
           } catch (err) {
