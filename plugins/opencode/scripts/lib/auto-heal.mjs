@@ -221,6 +221,27 @@ export async function autoHealJob(workspace, job, opts = {}) {
 
   // Not terminal. Can we at least declare it dead?
   if (!probe.reachable) {
+    const updatedMs = toEpochMs(job.updatedAt);
+    const idleMs = updatedMs ? Date.now() - updatedMs : Infinity;
+    if (!isProcessAlive(job.pid) && idleMs >= STALE_IDLE_MS) {
+      const errMsg = "server unreachable while worker dead";
+      if (dryRun) {
+        return { job, action: "would-fail", details: { errorMessage: errMsg } };
+      }
+
+      upsertJob(workspace, {
+        id: job.id,
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        errorMessage: errMsg,
+        healed: true,
+      });
+      return {
+        job: { ...job, status: "failed", errorMessage: errMsg, healed: true },
+        action: "healed-failed",
+        details: { errorMessage: errMsg },
+      };
+    }
     return { job, action: "skip", reason: `server unreachable: ${probe.error}` };
   }
 
