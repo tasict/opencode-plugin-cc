@@ -11,6 +11,28 @@ Use OpenCode from inside Claude Code for code reviews or to delegate tasks.
 This plugin is for Claude Code users who want an easy way to start using OpenCode from the workflow
 they already have.
 
+## Quickstart
+
+```bash
+# 1. Install opencode (once)
+npm i -g opencode-ai   # or: brew install opencode
+
+# 2. Install the plugin (see Install section below)
+
+# 3. Run the self-test — fixes common footguns for you
+node ~/.claude/plugins/cache/tasict-opencode-plugin-cc/opencode/1.0.0/scripts/opencode-companion.mjs doctor --fix
+```
+
+Then delegate a task from Claude Code:
+
+```
+/opencode:rescue grep for XXX in src/ and summarize
+```
+
+`doctor --fix` writes the correct `~/.config/opencode/opencode.json` permissions so the
+bash tool does not hang in headless mode (sst/opencode#14473). This is the single biggest
+footgun for newcomers — `ensureServer` will also run this fix automatically on first use.
+
 ## What You Get
 
 - `/opencode:review` for a normal read-only OpenCode review
@@ -100,6 +122,56 @@ To check your configured providers:
 ## Review Gate
 
 When enabled via `/opencode:setup --enable-review-gate`, a Stop hook runs a targeted OpenCode review on Claude's response. If issues are found, the stop is blocked so Claude can address them first. Warning: can create long-running loops and drain usage limits.
+
+## Job Auto-Heal
+
+Long-running tasks spawned via `/opencode:task --background` occasionally get
+stuck in `investigating` status even after the OpenCode session has finished
+server-side — typically because `POST /session/:id/message` fails to close its
+HTTP body, the task-worker is killed, or the companion's watcher misses the
+terminal signal.
+
+The companion now reconciles this automatically:
+
+- `companion.mjs status` and `companion.mjs result` run a silent auto-heal
+  pass before they read state, so they never report a false "running" state
+  for a session that is actually complete.
+- `companion.mjs heal` scans for stuck jobs and reconciles them in bulk. Pass
+  `--dry-run` to preview, `--json` for machine-readable output, and `--all`
+  to include jobs from other Claude sessions.
+
+Each heal check queries `GET /session/:id/message?limit=1`. If the last
+assistant message has `info.finish` set and `info.time.completed >= job.startedAt`,
+the job is transitioned to `completed` and the message text is persisted to
+the job data file. If the task-worker PID is dead and the session has been
+silent for >60 s, the job is transitioned to `failed` with a clear reason.
+
+If the OpenCode server is unreachable, auto-heal is a no-op — status/result
+commands still work, they just can't move stuck jobs forward until the server
+comes back.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENCODE_REQUEST_TIMEOUT_MS` | `1800000` | Per-HTTP-request abort timeout |
+| `OPENCODE_PROMPT_TIMEOUT_MS` | `14400000` | `sendPrompt` absolute cap (races the 5-min server body-close) |
+| `OPENCODE_IDLE_TIMEOUT_MS` | `900000` | Session idle watchdog — no activity for this long → abort |
+| `OPENCODE_PGREP_MISS_THRESHOLD` | `3` | Consecutive pgrep-misses before declaring a stuck bash tool |
+| `OPENCODE_COMPLETION_POLL_MS` | `5000` | Watcher poll interval during `sendPrompt` |
+| `OPENCODE_COMPANION_DATA` | (self-derived) | Override for plugin data dir (otherwise derived from script path) |
+| `OPENCODE_MONITOR_RESULT_CHARS` | (hook default) | Monitor hook: max chars per tool-result snippet |
+| `OPENCODE_MONITOR_HEARTBEAT_POLLS` | (hook default) | Monitor hook: polls between heartbeats |
+| `OPENCODE_SERVER_PASSWORD` | (unset) | HTTP Basic auth password for `opencode serve` |
+| `OPENCODE_SERVER_USERNAME` | `opencode` | HTTP Basic auth username |
+
+Run `companion.mjs config` to see resolved values with source (env vs default).
+
+## Pitfalls
+
+- **`companion status` stuck on `investigating`** — run `companion heal` (or wait; `status`/`result` auto-heal on every call).
+- **Bash tool hangs for minutes** — run `companion doctor --fix` to merge the required `permission.*=allow` keys into `~/.config/opencode/opencode.json`. This is sst/opencode#14473 in headless mode.
+- **`CLAUDE_PLUGIN_DATA` points at another plugin** — harmless: the companion self-derives its own data dir from `import.meta.url`. `doctor` will print a WARN so you know.
 
 ## Troubleshooting
 

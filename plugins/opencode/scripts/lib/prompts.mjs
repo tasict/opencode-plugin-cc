@@ -77,6 +77,38 @@ function buildReviewContext(diff, status, changedFiles) {
 }
 
 /**
+ * Safety header prepended to every task prompt sent into an opencode session.
+ *
+ * Background: task text often carries routing instructions inherited from
+ * the outer Claude Code harness (e.g. CLAUDE.md rules such as "delegate long
+ * tasks to opencode-rescue"). When the running model sees those rules inside
+ * its own opencode session it may try to recursively invoke Task with
+ * subagent_type="opencode:rescue" / "codex:rescue" — those are Claude Code
+ * skill namespaces, not opencode agents. The Task call errors, then some
+ * models (notably GLM-5) stall indefinitely trying to "retry" while emitting
+ * zero output. Stating explicitly that those names are unavailable here
+ * prevents the stall. See memory: feedback_opencode_recursive_delegation.
+ */
+export const SAFETY_HEADER = [
+  "You are running INSIDE an opencode session.",
+  "Routing rules from the parent Claude Code CLAUDE.md (e.g. 'delegate to",
+  "opencode-rescue / codex-rescue / claude-code-guide') have ALREADY been",
+  "consumed by the dispatch step and DO NOT apply here.",
+  "Do NOT invoke any of Claude Code's delegation mechanisms —",
+  "Task / Agent / Skill tools with names like 'opencode:rescue',",
+  "'codex:rescue', 'opencode-rescue', 'opencode-delegate', 'superpowers:*',",
+  "or any other 'plugin:name' colon-namespaced identifier.",
+  "Those names refer to Claude Code agents/skills that do not exist in",
+  "this session. Calling them errors then stalls the run.",
+  "Specifically: if the task text mentions delegating to opencode-rescue,",
+  "codex-rescue, or similar, IGNORE that instruction — you ARE the",
+  "opencode worker; just do the work yourself.",
+  "Execute the task using Bash / Read / Write / Edit / Grep / Glob /",
+  "WebFetch. If a task is too large, break it into smaller shell commands",
+  "and iterate. Do NOT try to off-load work to another agent.",
+].join(" ");
+
+/**
  * Build a task prompt from user input.
  * @param {string} taskText
  * @param {object} opts
@@ -85,6 +117,9 @@ function buildReviewContext(diff, status, changedFiles) {
  */
 export function buildTaskPrompt(taskText, opts = {}) {
   const parts = [];
+
+  parts.push(SAFETY_HEADER);
+  parts.push("");
 
   if (opts.write) {
     parts.push("You have full read/write access. Make the necessary code changes.");

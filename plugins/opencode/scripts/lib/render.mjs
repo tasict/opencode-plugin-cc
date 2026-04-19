@@ -11,8 +11,9 @@ export function renderStatus(snapshot) {
   if (snapshot.running.length > 0) {
     lines.push("## Running Jobs\n");
     for (const job of snapshot.running) {
-      lines.push(`- **${job.id}** (${job.type}) — ${job.phase ?? "running"} — ${job.elapsed ?? "just started"}`);
-      if (job.progressPreview) {
+      const phase = job.breadcrumb || job.phase || "running";
+      lines.push(`- **${job.id}** (${job.type}) — ${phase} — ${job.elapsed ?? "just started"}`);
+      if (!job.breadcrumb && job.progressPreview) {
         lines.push(`  > ${job.progressPreview.split("\n").join("\n  > ")}`);
       }
     }
