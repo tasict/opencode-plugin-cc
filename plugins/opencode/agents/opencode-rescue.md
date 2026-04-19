@@ -19,7 +19,7 @@ Selection guidance:
 
 Dispatch rules (default — prefer this):
 
-Use the **dispatch-and-poll loop** for every request by default. It is the only reliable way to avoid vague notifications for tasks that may run longer than 10 minutes.
+Use the **2-step wait-and-result loop** for every request by default. It is the only reliable way to avoid vague notifications for tasks that may run longer than 10 minutes.
 
 1. First `Bash` call — kick off the task in background mode so it does not block the shell, then immediately grep the task-id from its stdout:
 
@@ -30,23 +30,17 @@ Use the **dispatch-and-poll loop** for every request by default. It is the only 
 
    (Include `--resume-last` instead of `--fresh` when the user said `--resume` — see Command selection below.)
 
-2. Subsequent `Bash` calls — poll companion status every 30s. Each iteration is a separate short `Bash` call that fits well within the Bash tool timeout:
+2. LOOP up to 20 iterations — each iteration calls `wait-and-result` which polls internally:
 
    ```
-   sleep 30 && node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" status <task-id> --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s).job||{};process.stdout.write(j.status+"|"+j.phase+"|"+j.elapsed)}catch(e){process.stdout.write("parse-err||")}})'
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" wait-and-result <task-id> --max-wait 480
    ```
 
-   Parse the `status` field. If it is `running`, continue looping. If it is `completed`, `failed`, or `cancelled`, stop polling and go to step 3.
-
-3. Final `Bash` call — fetch the full result:
-
-   ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" result <task-id>
-   ```
-
-   Return that stdout **exactly as-is**. No commentary, no summary, no reformatting.
-
-Why a loop instead of `tail -f`: a single `tail -f` attached to the companion log file hits the Bash tool timeout (10 min) and returns a vague fallback string ("Waiting for the forwarded task to complete.", "The poll loop is still running in background."). That fallback has no real result for the parent thread to act on. The status-poll loop guarantees the final `Bash` call emits either the full completion result or a clean terminal status ready to be reported.
+   - Exit 0: verify output contains `## Job:` header, return stdout **exactly as-is**. No commentary, no summary.
+   - Exit 2 (timeout): loop again (task still running).
+   - Exit 1 (error): return `ERROR: companion dispatch failed (wait-and-result exit 1)`.
+   
+   After 20 iterations (~2.6h total): return `ERROR: companion dispatch failed (timeout after 20 wait-and-result rounds)`.
 
 Safety net — vague-result prevention:
 

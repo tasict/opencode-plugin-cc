@@ -41,6 +41,7 @@ const handlers = {
   "task-resume-candidate": handleTaskResumeCandidate,
   status: handleStatus,
   result: handleResult,
+  "wait-and-result": handleWaitAndResult,
   cancel: handleCancel,
   heal: handleHeal,
   doctor: handleDoctor,
@@ -583,6 +584,85 @@ async function handleResult(argv) {
   const resultData = readJson(dataFile);
 
   console.log(renderResult(enriched, resultData));
+}
+
+async function handleWaitAndResult(argv) {
+  const { options, positional } = parseArgs(argv, {
+    valueOptions: ["max-wait"],
+    booleanOptions: ["json"],
+  });
+
+  const ref = positional[0];
+  if (!ref) {
+    console.error("No task ID provided.");
+    process.exit(1);
+  }
+
+  const maxWait = parseInt(options["max-wait"] ?? "480", 10);
+  if (isNaN(maxWait) || maxWait < 1 || maxWait > 600) {
+    console.error("--max-wait must be between 1 and 600 seconds.");
+    process.exit(1);
+  }
+
+  const workspace = await resolveWorkspace();
+  const state = loadState(workspace);
+  const jobs = state.jobs ?? [];
+
+  const { job, ambiguous } = matchJobReference(jobs, ref);
+  if (ambiguous) {
+    console.error(`Ambiguous job reference "${ref}". Please provide a more specific ID.`);
+    process.exit(1);
+  }
+  if (!job) {
+    console.error(`No job found for "${ref}".`);
+    process.exit(1);
+  }
+
+  const startTime = Date.now();
+  const pollInterval = 250;
+  const maxWaitMs = maxWait * 1000;
+  const logFile = jobLogPath(workspace, job.id);
+
+  const terminalStatuses = ["completed", "failed", "cancelled"];
+
+  const isTerminal = (j) => terminalStatuses.includes(j?.status);
+
+  if (isTerminal(job)) {
+    const enriched = enrichJob(job, workspace);
+    const dataFile = jobDataPath(workspace, job.id);
+    const resultData = readJson(dataFile);
+    console.log(renderResult(enriched, resultData));
+    process.exit(0);
+  }
+
+  while (Date.now() - startTime < maxWaitMs) {
+    await new Promise((r) => setTimeout(r, pollInterval));
+
+    const currentState = loadState(workspace);
+    const { job: currentJob } = matchJobReference(currentState.jobs ?? [], ref);
+    if (isTerminal(currentJob)) {
+      const enriched = enrichJob(currentJob, workspace);
+      const dataFile = jobDataPath(workspace, currentJob.id);
+      const resultData = readJson(dataFile);
+      console.log(renderResult(enriched, resultData));
+      process.exit(0);
+    }
+  }
+
+  const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
+  const timeoutOutput = {
+    status: "running",
+    elapsed: elapsedSec,
+    task_id: job.id,
+    log_file: logFile,
+  };
+
+  if (options.json) {
+    console.log(JSON.stringify(timeoutOutput));
+  } else {
+    console.log(JSON.stringify(timeoutOutput));
+  }
+  process.exit(2);
 }
 
 async function handleCancel(argv) {
