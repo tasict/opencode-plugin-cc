@@ -10,10 +10,9 @@
 //
 // This module provides a best-effort reconciliation pass: given a job with
 // an `opencodeSessionId`, query the OpenCode server for the last assistant
-// message in that session. If it looks terminal (info.finish set and
-// completed >= job.startedAt), upsert the job as completed and persist the
-// text. If the worker process is gone and the session has been idle long
-// enough, mark as failed with a clear error message.
+// message in that session. If it looks terminal, upsert the job as completed
+// and persist the text. If the worker process is gone and the session has
+// been idle long enough, mark as failed with a clear error message.
 //
 // All functions are no-ops (or log to stderr and return the original job)
 // when the server is unreachable, so callers can sprinkle autoHealJob at
@@ -26,6 +25,7 @@ import { ensureDir } from "./fs.mjs";
 import { upsertJob, jobDataPath } from "./state.mjs";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:4096";
+const STRICT_TERMINAL = process.env.OPENCODE_STRICT_TERMINAL === "1";
 // A worker/session can be legitimately silent for a while (big model thinking,
 // slow tool) — only declare it dead after >60s of no session activity AND no
 // live task-worker process. 60s matches the spec.
@@ -112,8 +112,10 @@ export async function probeSessionTerminal(baseUrl, sessionId, startedAtMs, head
 
     const looksTerminal =
       info.role === "assistant" &&
-      typeof info.finish === "string" &&
-      completed >= (startedAtMs || 0);
+      completed >= (startedAtMs || 0) &&
+      (STRICT_TERMINAL
+        ? typeof info.finish === "string"
+        : typeof info.finish === "string" || completed > 0);
 
     if (looksTerminal) {
       return {

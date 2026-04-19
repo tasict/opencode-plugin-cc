@@ -19,10 +19,11 @@ const SERVER_START_TIMEOUT = 30_000;
 // lives in the watcher via IDLE_TIMEOUT_MS + pgrep child-process check.
 const REQUEST_TIMEOUT_MS = Number(process.env.OPENCODE_REQUEST_TIMEOUT_MS) || 1_800_000;
 const PROMPT_TIMEOUT_MS = Number(process.env.OPENCODE_PROMPT_TIMEOUT_MS) || 14_400_000;
+const STRICT_TERMINAL = process.env.OPENCODE_STRICT_TERMINAL === "1";
 // How long a session may go without ANY activity signal before we assume it
 // is stuck. Activity = new message, new parts, tool output growth, status
-// change. Default 15 min — long enough for most silent-but-alive tasks.
-const IDLE_TIMEOUT_MS = Number(process.env.OPENCODE_IDLE_TIMEOUT_MS) || 900_000;
+// change. Default 1h — long enough for silent-but-live tool subprocesses.
+const IDLE_TIMEOUT_MS = Number(process.env.OPENCODE_IDLE_TIMEOUT_MS) || 3_600_000;
 // Bash-tool "no child process" consecutive-miss threshold. If the latest
 // tool is a bash in status=running but opencode serve has zero child
 // processes for N polls in a row, declare stuck. 3 × 5s = 15s grace.
@@ -271,6 +272,8 @@ export function createClient(baseUrl, opts = {}) {
               const last = Array.isArray(arr) ? arr[arr.length - 1] : null;
               const info = last?.info;
               const parts = Array.isArray(last?.parts) ? last.parts : [];
+              const completed = typeof info?.time?.completed === "number" ? info.time.completed : 0;
+              const hasTerminalFinish = typeof info?.finish === "string";
               // Most recent tool part — the one actually "running" if any.
               let lastTool = null;
               for (let i = parts.length - 1; i >= 0; i--) {
@@ -293,13 +296,12 @@ export function createClient(baseUrl, opts = {}) {
               }
 
               // Completion signal: assistant message created after our prompt
-              // started, with a terminal `finish` field populated.
+              // started. Some OpenCode versions omit `finish` on terminal messages.
               if (
                 info &&
                 info.role === "assistant" &&
-                typeof info.time?.completed === "number" &&
-                info.time.completed >= startedAt &&
-                typeof info.finish === "string"
+                completed >= startedAt &&
+                (STRICT_TERMINAL ? hasTerminalFinish : hasTerminalFinish || completed > 0)
               ) {
                 return { source: "watcher", data: last };
               }
