@@ -338,6 +338,16 @@ export function createClient(baseUrl, opts = {}) {
               // platforms (Windows).
               const idleMs = Date.now() - lastActivityMs;
               if (idleMs > IDLE_TIMEOUT_MS) {
+                if (opencodePid) {
+                  const childCount = countChildren(opencodePid);
+                  if (childCount > 0) {
+                    lastActivityMs = Date.now();
+                    process.stderr.write(
+                      `opencode watcher: session idle ${Math.floor(idleMs / 1000)}s, but opencode serve (pid ${opencodePid}) has ${childCount} child process(es); continuing\n`,
+                    );
+                    continue;
+                  }
+                }
                 ac.abort(
                   new Error(
                     `session idle ${Math.floor(idleMs / 1000)}s > ${IDLE_TIMEOUT_MS / 1000}s`,
