@@ -52,6 +52,7 @@ Command selection:
 - Use exactly one `task` invocation per rescue handoff (followed by poll and result calls).
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text. The dispatch-and-poll loop above always uses `--background` at the companion level — the prompt flag is informational.
 - If the forwarded request includes `--model` or `--variant`, pass them through to `task`.
+- If the forwarded request includes `--file <path>` (repeatable), pass each through to `task` unchanged.
 - If the forwarded request includes `--agent`, pass it through to `task`.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.

@@ -10,7 +10,9 @@ import fs from "node:fs";
 
 import { parseArgs, extractTaskText } from "./lib/args.mjs";
 import { isOpencodeInstalled, getOpencodeVersion, spawnDetached } from "./lib/process.mjs";
-import { isServerRunning, ensureServer, createClient, connect } from "./lib/opencode-server.mjs";
+import {
+  isServerRunning, ensureServer, createClient, connect, buildFilePart,
+} from "./lib/opencode-server.mjs";
 import { resolveWorkspace } from "./lib/workspace.mjs";
 import { loadState, updateState, upsertJob, generateJobId, jobDataPath, jobLogPath } from "./lib/state.mjs";
 import { buildStatusSnapshot, resolveResultJob, resolveCancelableJob, enrichJob, matchJobReference } from "./lib/job-control.mjs";
@@ -244,10 +246,11 @@ async function handleAdversarialReview(argv) {
 async function handleTask(argv) {
   const { options, positional } = parseArgs(argv, {
     valueOptions: ["model", "agent", "variant"],
+    arrayOptions: ["file"],
     booleanOptions: ["write", "background", "wait", "resume-last", "fresh"],
   });
 
-  const taskText = extractTaskText(argv, ["model", "agent", "variant"], [
+  const taskText = extractTaskText(argv, ["model", "agent", "variant", "file"], [
     "write", "background", "wait", "resume-last", "fresh",
   ]);
 
@@ -259,6 +262,13 @@ async function handleTask(argv) {
   const workspace = await resolveWorkspace();
   const isWrite = options.write !== undefined ? options.write : true;
   const agentName = options.agent ?? (isWrite ? "build" : "plan");
+
+  // Resolve attachments up front so a bad path fails here, before any
+  // session is created or a background worker is spawned. Paths are
+  // workspace-relative (matching where the OpenCode server runs) and are
+  // forwarded to the worker as absolute paths.
+  const filePaths = (options.file ?? []).map((f) => path.resolve(workspace, f));
+  const attachments = filePaths.map((f) => buildFilePart(f));
 
   // Check for resume
   let resumeSessionId = null;
@@ -296,6 +306,7 @@ async function handleTask(argv) {
         resumeSessionId,
         model: options.model,
         variant: options.variant,
+        files: filePaths,
       },
     });
 
@@ -311,6 +322,7 @@ async function handleTask(argv) {
     if (resumeSessionId) workerArgs.push("--resume-session", resumeSessionId);
     if (options.model) workerArgs.push("--model", options.model);
     if (options.variant) workerArgs.push("--variant", options.variant);
+    for (const f of filePaths) workerArgs.push("--file", f);
 
     const child = spawnDetached("node", workerArgs, { cwd: workspace, logFile });
     upsertJob(workspace, { id: job.id, pid: child.pid });
@@ -343,6 +355,7 @@ async function handleTask(argv) {
         `Agent: ${agentName}, Write: ${isWrite},` +
           ` Model: ${options.model || "(default)"},` +
           ` Variant: ${options.variant || "(default)"},` +
+          ` Files: ${filePaths.length ? filePaths.join(", ") : "(none)"},` +
           ` Prompt: ${prompt.length} chars`
       );
 
@@ -350,6 +363,7 @@ async function handleTask(argv) {
         agent: agentName,
         model: options.model,
         variant: options.variant,
+        attachments,
       });
 
       report("finalizing", "Processing task output...");
@@ -389,6 +403,7 @@ async function handleTaskWorker(argv) {
     valueOptions: [
       "job-id", "workspace", "task-text", "agent", "model", "variant", "resume-session",
     ],
+    arrayOptions: ["file"],
     booleanOptions: ["write"],
   });
 
@@ -420,12 +435,14 @@ async function handleTaskWorker(argv) {
       upsertJob(workspace, { id: jobId, opencodeSessionId: sessionId });
 
       const prompt = buildTaskPrompt(taskText, { write: isWrite });
+      const attachments = (options.file ?? []).map((f) => buildFilePart(f));
       report("investigating", "Running task...");
 
       const response = await client.sendPrompt(sessionId, prompt, {
         agent: agentName,
         model: options.model,
         variant: options.variant,
+        attachments,
       });
 
       const text = extractResponseText(response);

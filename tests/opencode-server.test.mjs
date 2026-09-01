@@ -1,6 +1,45 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildPromptBody } from "../plugins/opencode/scripts/lib/opencode-server.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+  buildPromptBody,
+  buildFilePart,
+} from "../plugins/opencode/scripts/lib/opencode-server.mjs";
+
+describe("buildFilePart", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oc-file-part-"));
+  const filePath = path.join(tmp, "notes.md");
+  const dirPath = path.join(tmp, "sub dir");
+  fs.writeFileSync(filePath, "hello");
+  fs.mkdirSync(dirPath);
+
+  it("builds a text/plain file:// part for a file", () => {
+    const part = buildFilePart(filePath);
+    assert.equal(part.type, "file");
+    assert.equal(part.mime, "text/plain");
+    assert.equal(part.filename, "notes.md");
+    assert.equal(part.url, pathToFileURL(filePath).href);
+  });
+
+  it("escapes special characters in the file URL", () => {
+    const part = buildFilePart(dirPath);
+    assert.equal(part.url, pathToFileURL(dirPath).href);
+    assert.ok(part.url.includes("%20"), "spaces should be percent-encoded");
+  });
+
+  it("marks directories as application/x-directory", () => {
+    const part = buildFilePart(dirPath);
+    assert.equal(part.mime, "application/x-directory");
+    assert.equal(part.filename, "sub dir");
+  });
+
+  it("throws for missing paths", () => {
+    assert.throws(() => buildFilePart(path.join(tmp, "nope.txt")), /File not found/);
+  });
+});
 
 describe("buildPromptBody", () => {
   it("wraps prompt text and passes agent through", () => {
@@ -58,6 +97,12 @@ describe("buildPromptBody", () => {
       variant: "max",
       system: "extra",
     });
+  });
+
+  it("places attachments before the text part, like `opencode run`", () => {
+    const file = { type: "file", url: "file:///tmp/a.png", filename: "a.png", mime: "text/plain" };
+    const body = buildPromptBody("hi", { attachments: [file] });
+    assert.deepEqual(body.parts, [file, { type: "text", text: "hi" }]);
   });
 
   it("omits unset options", () => {

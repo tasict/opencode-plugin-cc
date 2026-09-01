@@ -3,6 +3,9 @@
 // OpenCode exposes a REST API + SSE. This module wraps that API.
 
 import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 // Re-export for spec-compliance / discoverability: probeSessionTerminal lives
 // in auto-heal.mjs because it is tightly coupled to heal-decision logic, but
@@ -40,7 +43,11 @@ const PGREP_MISS_THRESHOLD = Number(process.env.OPENCODE_PGREP_MISS_THRESHOLD) |
  */
 export function buildPromptBody(promptText, opts = {}) {
   const body = {
-    parts: [{ type: "text", text: promptText }],
+    // Attachments come first, mirroring `opencode run`'s `parts: [...files, text]`.
+    parts: [
+      ...(Array.isArray(opts.attachments) ? opts.attachments : []),
+      { type: "text", text: promptText },
+    ],
   };
   if (opts.agent) body.agent = opts.agent;
   if (opts.model) {
@@ -62,6 +69,34 @@ export function buildPromptBody(promptText, opts = {}) {
   if (opts.variant) body.variant = opts.variant;
   if (opts.system) body.system = opts.system;
   return body;
+}
+
+/**
+ * Build a file part for the prompt body, mirroring `opencode run -f` against
+ * a local server: a `file://` URL plus mime. The server runs its Read tool on
+ * text/plain parts (inlining content, and producing image attachments for
+ * media) and lists application/x-directory parts, so no encoding is needed
+ * here and local-file semantics stay identical to the CLI.
+ * @param {string} filePath - path to attach (absolute, or relative to the workspace)
+ * @returns {{ type: "file", url: string, filename: string, mime: string }}
+ */
+export function buildFilePart(filePath) {
+  const resolved = path.resolve(filePath);
+  let stat;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    throw new Error(`File not found: ${filePath}`);
+  }
+  if (!stat.isFile() && !stat.isDirectory()) {
+    throw new Error(`Cannot attach special file: ${filePath}`);
+  }
+  return {
+    type: "file",
+    url: pathToFileURL(resolved).href,
+    filename: path.basename(resolved),
+    mime: stat.isDirectory() ? "application/x-directory" : "text/plain",
+  };
 }
 
 /**

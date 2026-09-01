@@ -2,13 +2,16 @@
 
 /**
  * Parse CLI arguments into options and positional args.
+ * `arrayOptions` are repeatable value flags (e.g. `--file a --file b`)
+ * collected into an array; `valueOptions` take a single (last-wins) value.
  * @param {string[]} argv
- * @param {{ valueOptions?: string[], booleanOptions?: string[] }} schema
- * @returns {{ options: Record<string, string|boolean>, positional: string[] }}
+ * @param {{ valueOptions?: string[], booleanOptions?: string[], arrayOptions?: string[] }} schema
+ * @returns {{ options: Record<string, string|boolean|string[]>, positional: string[] }}
  */
 export function parseArgs(argv, schema = {}) {
   const valueSet = new Set(schema.valueOptions ?? []);
   const boolSet = new Set(schema.booleanOptions ?? []);
+  const arraySet = new Set(schema.arrayOptions ?? []);
   const options = {};
   const positional = [];
 
@@ -21,6 +24,8 @@ export function parseArgs(argv, schema = {}) {
     const key = arg.slice(2);
     if (valueSet.has(key)) {
       options[key] = argv[++i] ?? "";
+    } else if (arraySet.has(key)) {
+      (options[key] ??= []).push(argv[++i] ?? "");
     } else if (boolSet.has(key) || !valueSet.has(key)) {
       options[key] = true;
     }

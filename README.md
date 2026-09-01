@@ -113,7 +113,7 @@ To check your configured providers:
 
 - `/opencode:review` -- Normal OpenCode code review (read-only). Supports `--base <ref>`, `--wait`, `--background`.
 - `/opencode:adversarial-review` -- Steerable review that challenges implementation and design decisions. Accepts custom focus text.
-- `/opencode:rescue` -- Delegates a task to OpenCode via the `opencode:opencode-rescue` subagent. Supports `--model`, `--variant`, `--agent`, `--resume`, `--fresh`, `--background`.
+- `/opencode:rescue` -- Delegates a task to OpenCode via the `opencode:opencode-rescue` subagent. Supports `--model`, `--variant`, `--file` (repeatable, like `opencode run -f`), `--agent`, `--resume`, `--fresh`, `--background`.
 - `/opencode:status` -- Shows running/recent OpenCode jobs for the current repo.
 - `/opencode:result` -- Shows final output for a finished job, including OpenCode session ID for resuming.
 - `/opencode:cancel` -- Cancels an active background OpenCode job.
