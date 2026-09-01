@@ -131,7 +131,7 @@ async function handleSetup(argv) {
 
 async function handleReview(argv) {
   const { options } = parseArgs(argv, {
-    valueOptions: ["base", "scope"],
+    valueOptions: ["base", "scope", "model", "variant"],
     booleanOptions: ["wait", "background"],
   });
 
@@ -157,6 +157,8 @@ async function handleReview(argv) {
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: "plan", // read-only agent for reviews
+        model: options.model,
+        variant: options.variant,
       });
 
       report("finalizing", "Processing review output...");
@@ -181,7 +183,7 @@ async function handleReview(argv) {
 
 async function handleAdversarialReview(argv) {
   const { options, positional } = parseArgs(argv, {
-    valueOptions: ["base", "scope"],
+    valueOptions: ["base", "scope", "model", "variant"],
     booleanOptions: ["wait", "background"],
   });
 
@@ -212,6 +214,8 @@ async function handleAdversarialReview(argv) {
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: "plan",
+        model: options.model,
+        variant: options.variant,
       });
 
       report("finalizing", "Processing review output...");
@@ -239,11 +243,11 @@ async function handleAdversarialReview(argv) {
 
 async function handleTask(argv) {
   const { options, positional } = parseArgs(argv, {
-    valueOptions: ["model", "agent"],
+    valueOptions: ["model", "agent", "variant"],
     booleanOptions: ["write", "background", "wait", "resume-last", "fresh"],
   });
 
-  const taskText = extractTaskText(argv, ["model", "agent"], [
+  const taskText = extractTaskText(argv, ["model", "agent", "variant"], [
     "write", "background", "wait", "resume-last", "fresh",
   ]);
 
@@ -291,6 +295,7 @@ async function handleTask(argv) {
         isWrite,
         resumeSessionId,
         model: options.model,
+        variant: options.variant,
       },
     });
 
@@ -305,6 +310,7 @@ async function handleTask(argv) {
     if (isWrite) workerArgs.push("--write");
     if (resumeSessionId) workerArgs.push("--resume-session", resumeSessionId);
     if (options.model) workerArgs.push("--model", options.model);
+    if (options.variant) workerArgs.push("--variant", options.variant);
 
     const child = spawnDetached("node", workerArgs, { cwd: workspace, logFile });
     upsertJob(workspace, { id: job.id, pid: child.pid });
@@ -333,10 +339,17 @@ async function handleTask(argv) {
       const prompt = buildTaskPrompt(taskText, { write: isWrite });
 
       report("investigating", "Sending task to OpenCode...");
-      log(`Agent: ${agentName}, Write: ${isWrite}, Prompt: ${prompt.length} chars`);
+      log(
+        `Agent: ${agentName}, Write: ${isWrite},` +
+          ` Model: ${options.model || "(default)"},` +
+          ` Variant: ${options.variant || "(default)"},` +
+          ` Prompt: ${prompt.length} chars`
+      );
 
       const response = await client.sendPrompt(sessionId, prompt, {
         agent: agentName,
+        model: options.model,
+        variant: options.variant,
       });
 
       report("finalizing", "Processing task output...");
@@ -373,7 +386,9 @@ async function handleTask(argv) {
 
 async function handleTaskWorker(argv) {
   const { options } = parseArgs(argv, {
-    valueOptions: ["job-id", "workspace", "task-text", "agent", "model", "resume-session"],
+    valueOptions: [
+      "job-id", "workspace", "task-text", "agent", "model", "variant", "resume-session",
+    ],
     booleanOptions: ["write"],
   });
 
@@ -409,6 +424,8 @@ async function handleTaskWorker(argv) {
 
       const response = await client.sendPrompt(sessionId, prompt, {
         agent: agentName,
+        model: options.model,
+        variant: options.variant,
       });
 
       const text = extractResponseText(response);

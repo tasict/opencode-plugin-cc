@@ -29,12 +29,13 @@ Execution rules:
 - That prompt drafting is the only Claude-side work allowed. Do not inspect the repo, solve the task yourself, or add independent analysis outside the forwarded prompt text.
 - Leave `--agent` unset unless the user explicitly requests a specific agent (build or plan).
 - Leave model unset by default. Add `--model` only when the user explicitly asks for one.
+- Same for `--variant` (provider-specific reasoning effort, e.g. `high`, `max`, `minimal`): only pass it when the user explicitly asks.
 
 Command selection:
 
 - Use exactly one `task` invocation per rescue handoff. Follow it with status polls and one final `result` call.
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`. The dispatch-and-poll loop always uses `--background` at the companion level internally.
-- If the forwarded request includes `--model`, pass it through to `task`.
+- If the forwarded request includes `--model` or `--variant`, pass them through to `task`.
 - If the forwarded request includes `--agent`, pass it through to `task`.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.

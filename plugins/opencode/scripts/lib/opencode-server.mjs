@@ -33,6 +33,38 @@ const IDLE_TIMEOUT_MS = Number(process.env.OPENCODE_IDLE_TIMEOUT_MS) || 3_600_00
 const PGREP_MISS_THRESHOLD = Number(process.env.OPENCODE_PGREP_MISS_THRESHOLD) || 3;
 
 /**
+ * Build the request body shared by sendPrompt and sendPromptAsync.
+ * `model` may be given as a `provider/model` string (like `opencode run -m`)
+ * or as the API's `{ providerID, modelID }` object; `variant` mirrors the
+ * `opencode run --variant` flag (provider-specific reasoning effort).
+ */
+export function buildPromptBody(promptText, opts = {}) {
+  const body = {
+    parts: [{ type: "text", text: promptText }],
+  };
+  if (opts.agent) body.agent = opts.agent;
+  if (opts.model) {
+    if (typeof opts.model === "string") {
+      const sep = opts.model.indexOf("/");
+      if (sep <= 0 || sep === opts.model.length - 1) {
+        throw new Error(
+          `Invalid model "${opts.model}": expected the provider/model format`
+        );
+      }
+      body.model = {
+        providerID: opts.model.slice(0, sep),
+        modelID: opts.model.slice(sep + 1),
+      };
+    } else {
+      body.model = opts.model;
+    }
+  }
+  if (opts.variant) body.variant = opts.variant;
+  if (opts.system) body.system = opts.system;
+  return body;
+}
+
+/**
  * Find the PID of `opencode serve` listening on `port`, if we can.
  * Returns null on Windows or any detection failure (caller degrades gracefully).
  */
@@ -232,12 +264,7 @@ export function createClient(baseUrl, opts = {}) {
      * we abort the hanging fetch and synthesize the response from the poll.
      */
     sendPrompt: async (sessionId, promptText, opts = {}) => {
-      const body = {
-        parts: [{ type: "text", text: promptText }],
-      };
-      if (opts.agent) body.agent = opts.agent;
-      if (opts.model) body.model = opts.model;
-      if (opts.system) body.system = opts.system;
+      const body = buildPromptBody(promptText, opts);
 
       const ac = new AbortController();
       const timeoutId = setTimeout(() => ac.abort(new Error("prompt timeout")), PROMPT_TIMEOUT_MS);
@@ -430,11 +457,7 @@ export function createClient(baseUrl, opts = {}) {
      * Send a prompt asynchronously (returns immediately).
      */
     sendPromptAsync: (sessionId, promptText, opts = {}) => {
-      const body = {
-        parts: [{ type: "text", text: promptText }],
-      };
-      if (opts.agent) body.agent = opts.agent;
-      if (opts.model) body.model = opts.model;
+      const body = buildPromptBody(promptText, opts);
       return request("POST", `/session/${sessionId}/prompt_async`, body);
     },
 
