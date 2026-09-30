@@ -89,7 +89,10 @@ export function spawnDetached(cmd, args, opts = {}) {
       detached: true,
       cwd: opts.cwd,
       env: { ...process.env, ...opts.env },
-      shell: IS_WINDOWS,
+      // No shell: args must reach the child as-is. A Windows shell would
+      // split the task text (e.g. --task-text "Reply with exactly: X") into
+      // separate argv tokens, truncating the task to its first word.
+      shell: false,
     });
   } finally {
     if (logFd !== null) fs.closeSync(logFd);

@@ -306,7 +306,8 @@ async function handleTask(argv) {
     if (resumeSessionId) workerArgs.push("--resume-session", resumeSessionId);
     if (options.model) workerArgs.push("--model", options.model);
 
-    const child = spawnDetached("node", workerArgs, { cwd: workspace, logFile });
+    // process.execPath: real node.exe, no shell/.cmd shim in between.
+    const child = spawnDetached(process.execPath, workerArgs, { cwd: workspace, logFile });
     upsertJob(workspace, { id: job.id, pid: child.pid });
     console.log(`OpenCode task started in background: ${job.id}`);
     console.log("Check `/opencode:status` for progress.");
