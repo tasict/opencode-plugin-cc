@@ -125,8 +125,11 @@ export async function ensureServer(opts = {}) {
 
   // Start the server
   // Windows npm shims are .cmd/.ps1; spawn() only resolves those via a shell.
+  // stdio MUST be "ignore": unread stdout/stderr pipes stay referenced in the
+  // parent event loop even after proc.unref(), so the companion would never
+  // exit while the detached server lives. Nobody reads these pipes anyway.
   const proc = spawn("opencode", ["serve", "--port", String(port)], {
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: "ignore",
     detached: true,
     cwd: opts.cwd,
     shell: IS_WINDOWS,
