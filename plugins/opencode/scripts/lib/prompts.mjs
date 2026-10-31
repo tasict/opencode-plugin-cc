@@ -122,7 +122,7 @@ export function buildTaskPrompt(taskText, opts = {}) {
   parts.push("");
 
   if (opts.write) {
-    parts.push("You have full read/write access. Make the necessary code changes.");
+    parts.push("Make the necessary code changes using the configured permissions.");
   } else {
     parts.push("This is a read-only investigation. Do not modify any files.");
   }

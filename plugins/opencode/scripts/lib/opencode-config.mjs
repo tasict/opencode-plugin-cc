@@ -2,21 +2,20 @@
 //
 // Background: opencode's bash tool hangs forever in headless mode when
 //   permission.external_directory == "ask" (sst/opencode#14473).
-// Our companion runs opencode serve in headless mode, so we MUST have:
+// Legacy OpenCode 1 runs `opencode serve` in headless mode, so it MUST have:
 //   permission.bash             = "allow"
 //   permission.edit             = "allow"
 //   permission.webfetch         = "allow"
 //   permission.external_directory = "allow"
 //
 // ensureOpencodeConfig() merges these in idempotently, preserving any other
-// user keys. Called from ensureServer() before spawning opencode serve, and
-// from the `doctor` subcommand.
+// user keys. OpenCode 2 owns permission policy and this repair is not applied.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { ensureDir, readJson } from "./fs.mjs";
+import { ensureDir } from "./fs.mjs";
 
 export const REQUIRED_PERMISSIONS = {
   bash: "allow",
@@ -42,7 +41,7 @@ export function resolveConfigPath() {
 export function readOpencodeConfig() {
   const p = resolveConfigPath();
   const exists = fs.existsSync(p);
-  const data = exists ? (readJson(p) ?? {}) : { $schema: "https://opencode.ai/config.json" };
+  const data = exists ? JSON.parse(fs.readFileSync(p, "utf8")) : { $schema: "https://opencode.ai/config.json" };
   return { path: p, exists, data };
 }
 
@@ -53,6 +52,7 @@ export function readOpencodeConfig() {
  */
 export function missingPermissions(data) {
   const perm = (data && data.permission) || {};
+  if (perm === "allow") return [];
   const missing = [];
   for (const [k, v] of Object.entries(REQUIRED_PERMISSIONS)) {
     if (perm[k] !== v) missing.push(k);
@@ -73,6 +73,7 @@ export function ensureOpencodeConfig(opts = {}) {
   const dryRun = !!opts.dryRun;
   const { path: p, exists, data } = readOpencodeConfig();
   const missing = missingPermissions(data);
+  if (opts.enabled === false) return { path: p, changed: false, missing, disabled: true, dryRun };
 
   if (missing.length === 0 && exists) {
     return { path: p, changed: false, missing: [], dryRun };
@@ -85,9 +86,11 @@ export function ensureOpencodeConfig(opts = {}) {
   // Merge permissions, preserving other keys.
   const merged = { ...data };
   if (!merged.$schema) merged.$schema = "https://opencode.ai/config.json";
-  merged.permission = { ...(merged.permission || {}), ...REQUIRED_PERMISSIONS };
+  merged.permission = { ...(typeof merged.permission === "object" ? merged.permission : {}), ...REQUIRED_PERMISSIONS };
 
   ensureDir(path.dirname(p));
+  const backupPath = exists ? `${p}.backup.${Date.now()}.${process.pid}` : null;
+  if (backupPath) fs.copyFileSync(p, backupPath, fs.constants.COPYFILE_EXCL);
   const tmp = `${p}.tmp.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(merged, null, 2) + "\n", "utf8");
   fs.renameSync(tmp, p);
@@ -95,5 +98,6 @@ export function ensureOpencodeConfig(opts = {}) {
   if (!opts.silent) {
     process.stderr.write(`[opencode-companion] Ensured opencode.json permissions (headless-safe)\n`);
   }
-  return { path: p, changed: true, missing, dryRun };
+  return { path: p, changed: true, missing, dryRun, backupPath,
+    changes: missing.map((key) => ({ key: `permission.${key}`, before: data.permission?.[key] ?? null, after: "allow" })) };
 }

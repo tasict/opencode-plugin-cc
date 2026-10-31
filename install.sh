@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # One-line installer for opencode-plugin-cc
 # Usage (inside Claude Code):
-#   ! curl -fsSL https://raw.githubusercontent.com/tasict/opencode-plugin-cc/main/install.sh | bash
+#   ! curl -fsSL https://raw.githubusercontent.com/NguyenCong2k/opencode-plugin-cc/main/install.sh | bash
 #
 # Or clone + run locally:
-#   ! bash <(curl -fsSL https://raw.githubusercontent.com/tasict/opencode-plugin-cc/main/install.sh)
+#   ! bash <(curl -fsSL https://raw.githubusercontent.com/NguyenCong2k/opencode-plugin-cc/main/install.sh)
 
 set -euo pipefail
 
-REPO="tasict/opencode-plugin-cc"
+REPO="NguyenCong2k/opencode-plugin-cc"
 PLUGIN_NAME="opencode"
 MARKETPLACE_NAME="tasict-opencode-plugin-cc"
 BRANCH="main"
@@ -39,6 +39,7 @@ MKT_DIR="$MARKETPLACES_DIR/$MARKETPLACE_NAME"
 
 if [ -d "$MKT_DIR" ]; then
   info "Marketplace already exists, pulling latest..."
+  git -C "$MKT_DIR" remote set-url origin "https://github.com/$REPO.git"
   git -C "$MKT_DIR" pull --ff-only origin "$BRANCH" 2>/dev/null || true
 else
   info "Cloning marketplace from GitHub..."

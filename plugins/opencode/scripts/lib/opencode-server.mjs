@@ -2,17 +2,17 @@
 // Unlike codex-plugin-cc which uses JSON-RPC over stdin/stdout,
 // OpenCode exposes a REST API + SSE. This module wraps that API.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-// Re-export for spec-compliance / discoverability: probeSessionTerminal lives
-// in auto-heal.mjs because it is tightly coupled to heal-decision logic, but
-// conceptually it is a server probe.
-export { probeSessionTerminal } from "./auto-heal.mjs";
-import { ensureOpencodeConfig } from "./opencode-config.mjs";
+import { readOpencodeConfig } from "./opencode-config.mjs";
 import { classifyError } from "./errors.mjs";
+import { spawnCommand, runCommandSync } from "./process.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
-const DEFAULT_PORT = 4096;
+const DEFAULT_PORT = 0;
 const DEFAULT_HOST = "127.0.0.1";
 const SERVER_START_TIMEOUT = 30_000;
 
@@ -31,6 +31,191 @@ const IDLE_TIMEOUT_MS = Number(process.env.OPENCODE_IDLE_TIMEOUT_MS) || 3_600_00
 // tool is a bash in status=running but opencode serve has zero child
 // processes for N polls in a row, declare stuck. 3 × 5s = 15s grace.
 const PGREP_MISS_THRESHOLD = Number(process.env.OPENCODE_PGREP_MISS_THRESHOLD) || 3;
+
+function basicAuthHeader(username, password) {
+  if (!password) return null;
+  const cred = Buffer.from(`${username || "opencode"}:${password}`).toString("base64");
+  return `Basic ${cred}`;
+}
+
+/**
+ * OpenCode 2 writes its managed-service registration here on every platform.
+ * XDG_STATE_HOME remains authoritative when explicitly configured.
+ */
+export function serviceRegistrationPaths(opts = {}) {
+  const env = opts.env ?? process.env;
+  const home = opts.home ?? os.homedir();
+  const paths = [];
+  if (env.XDG_STATE_HOME) {
+    paths.push(path.join(env.XDG_STATE_HOME, "opencode", "service.json"));
+  }
+  paths.push(path.join(home, ".local", "state", "opencode", "service.json"));
+  return [...new Set(paths)];
+}
+
+export function readServiceRegistration(paths = serviceRegistrationPaths()) {
+  for (const registrationPath of paths) {
+    try {
+      const data = JSON.parse(fs.readFileSync(registrationPath, "utf8"));
+      if (typeof data?.url !== "string" || !data.url.startsWith("http")) continue;
+      return { ...data, registrationPath };
+    } catch {
+      // Missing, stale, or mid-write registration. Try the next candidate.
+    }
+  }
+  return null;
+}
+
+async function probeJson(url, requestPath, headers = {}) {
+  try {
+    const res = await fetch(`${url}${requestPath}`, {
+      headers,
+      signal: AbortSignal.timeout(3000),
+    });
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!res.ok || !contentType.includes("application/json")) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Locate a live OpenCode server without confusing the OpenCode 2 web shell
+ * (which returns HTTP 200 HTML for unknown v1 paths) with a v1 API server.
+ */
+export async function findRunningServer(opts = {}) {
+  const username = opts.username ?? process.env.OPENCODE_SERVER_USERNAME ?? "opencode";
+  const envPassword = opts.password ?? process.env.OPENCODE_SERVER_PASSWORD;
+  const explicitUrl = opts.url ?? process.env.OPENCODE_SERVER_URL;
+
+  const candidates = [];
+  if (explicitUrl) {
+    candidates.push({ url: explicitUrl.replace(/\/$/, ""), password: envPassword, source: "explicit" });
+  } else {
+    const registration = readServiceRegistration(opts.registrationPaths);
+    if (registration) {
+      candidates.push({
+        url: registration.url.replace(/\/$/, ""),
+        password: registration.password,
+        username,
+        pid: registration.pid,
+        version: registration.version,
+        source: "managed-service",
+        registrationPath: registration.registrationPath,
+      });
+    }
+
+    const config = readOpencodeConfig().data;
+    const host = opts.host ?? config.server?.hostname ?? DEFAULT_HOST;
+    const port = opts.port ?? Number(process.env.OPENCODE_SERVER_PORT || config.server?.port || 0);
+    if (port) candidates.push({
+      url: `http://${host}:${port}`,
+      password: envPassword,
+      username,
+      source: "configured-port",
+    });
+  }
+
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (seen.has(candidate.url)) continue;
+    seen.add(candidate.url);
+    const auth = basicAuthHeader(candidate.username ?? username, candidate.password);
+    const headers = auth ? { Authorization: auth } : {};
+
+    const v2 = await probeJson(candidate.url, "/api/info", headers);
+    if (v2 && typeof v2.version === "string") {
+      return {
+        ...candidate,
+        apiVersion: 2,
+        version: v2.version,
+        pid: v2.pid ?? candidate.pid,
+        username: candidate.username ?? username,
+      };
+    }
+
+    const v1 = await probeJson(candidate.url, "/global/health", headers);
+    if (v1 && (v1.healthy === true || typeof v1.version === "string")) {
+      return {
+        ...candidate,
+        apiVersion: 1,
+        version: v1.version ?? candidate.version,
+        username: candidate.username ?? username,
+      };
+    }
+  }
+  return null;
+}
+
+function installedMajorVersion() {
+  try {
+    const r = runCommandSync("opencode", ["--version"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    const text = `${r.stdout || ""} ${r.stderr || ""}`;
+    const match = text.match(/(?:^|\s)v?(\d+)\.(\d+)\.(\d+)/);
+    return match ? Number(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function waitForExit(proc, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let stderr = "";
+    proc.stderr?.on("data", (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => reject(new Error("OpenCode command timed out")), timeoutMs);
+    proc.once("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    proc.once("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(stderr.trim() || `OpenCode command exited ${code}`));
+    });
+  });
+}
+
+function normalizeV2Message(message) {
+  if (!message || typeof message !== "object") return message;
+  if (message.info || message.parts) return message;
+  const role = message.type === "assistant" ? "assistant" : message.type;
+  return {
+    info: {
+      ...message,
+      role,
+    },
+    parts: Array.isArray(message.content)
+      ? message.content.map((part) => ({
+          ...part,
+          tool: part.tool ?? part.name,
+        }))
+      : [],
+    _v2: message,
+  };
+}
+
+function parseModelRef(model) {
+  if (!model || typeof model === "object") return model;
+  const slash = model.indexOf("/");
+  if (slash <= 0 || slash === model.length - 1) {
+    throw new Error(`Invalid OpenCode 2 model "${model}"; expected provider/model[#variant]`);
+  }
+  const providerID = model.slice(0, slash);
+  const modelAndVariant = model.slice(slash + 1);
+  const hash = modelAndVariant.lastIndexOf("#");
+  if (hash > 0 && hash < modelAndVariant.length - 1) {
+    return {
+      providerID,
+      id: modelAndVariant.slice(0, hash),
+      variant: modelAndVariant.slice(hash + 1),
+    };
+  }
+  return { providerID, id: modelAndVariant };
+}
 
 /**
  * Find the PID of `opencode serve` listening on `port`, if we can.
@@ -87,15 +272,8 @@ function countChildren(pid) {
  * @param {number} port
  * @returns {Promise<boolean>}
  */
-export async function isServerRunning(host = DEFAULT_HOST, port = DEFAULT_PORT) {
-  try {
-    const res = await fetch(`http://${host}:${port}/global/health`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
+export async function isServerRunning(host, port) {
+  return (await findRunningServer(host || port ? { url: `http://${host ?? DEFAULT_HOST}:${port ?? DEFAULT_PORT}` } : {})) !== null;
 }
 
 /**
@@ -107,37 +285,65 @@ export async function isServerRunning(host = DEFAULT_HOST, port = DEFAULT_PORT) 
  * @returns {Promise<{ url: string, pid?: number, alreadyRunning: boolean }>}
  */
 export async function ensureServer(opts = {}) {
-  const host = opts.host ?? DEFAULT_HOST;
-  const port = opts.port ?? DEFAULT_PORT;
-  const url = `http://${host}:${port}`;
+  const config = readOpencodeConfig().data;
+  const host = opts.host ?? config.server?.hostname ?? DEFAULT_HOST;
+  const port = opts.port ?? Number(process.env.OPENCODE_SERVER_PORT || config.server?.port || 0);
+  let url = `http://${host}:${port}`;
 
-  if (await isServerRunning(host, port)) {
-    return { url, alreadyRunning: true };
+  const running = await findRunningServer({
+    host,
+    port,
+    url: opts.url,
+    registrationPaths: opts.registrationPaths,
+  });
+  if (running) {
+    return { ...running, alreadyRunning: true };
   }
 
-  // Self-heal permissions BEFORE spawning the server. The running daemon reads
-  // opencode.json at startup; fixing it after the spawn would require a restart.
-  try {
-    ensureOpencodeConfig();
-  } catch (err) {
-    process.stderr.write(`[opencode-companion] ensureOpencodeConfig failed: ${err.message}\n`);
+  const major = installedMajorVersion();
+  if (major == null) throw new Error("OpenCode CLI not found; install it with: npm install -g @opencode/cli");
+
+  if (major >= 2) {
+    // OpenCode 2 owns the lifecycle, random port, password, and registration.
+    // Starting a second fixed-port `serve` process bypasses that contract.
+    const proc = spawnCommand("opencode", ["service", "start"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: opts.cwd,
+    });
+    await waitForExit(proc, SERVER_START_TIMEOUT);
+
+    const deadline = Date.now() + SERVER_START_TIMEOUT;
+    while (Date.now() < deadline) {
+      const managed = await findRunningServer({ registrationPaths: opts.registrationPaths });
+      if (managed?.apiVersion === 2) return { ...managed, alreadyRunning: false };
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new Error(`OpenCode 2 managed service failed to start within ${SERVER_START_TIMEOUT / 1000}s`);
   }
 
   // Start the server
   // Windows npm shims are .cmd/.ps1; spawn() only resolves those via a shell.
-  const proc = spawn("opencode", ["serve", "--port", String(port)], {
+  const proc = spawnCommand("opencode", ["serve", "--hostname", host, "--port", String(port)], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
     cwd: opts.cwd,
-    shell: IS_WINDOWS,
   });
+  let startupError;
+  proc.on("error", (err) => { startupError = err; });
+  proc.stdout.on("data", (chunk) => {
+    const match = chunk.toString().match(/https?:\/\/[^\s]+/);
+    if (match) url = match[0];
+  });
+  proc.stderr.on("data", () => {});
   proc.unref();
 
   // Wait for the server to become ready
   const deadline = Date.now() + SERVER_START_TIMEOUT;
   while (Date.now() < deadline) {
-    if (await isServerRunning(host, port)) {
-      return { url, pid: proc.pid, alreadyRunning: false };
+    if (startupError) throw startupError;
+    const started = await findRunningServer({ host, port, url });
+    if (started?.apiVersion === 1) {
+      return { ...started, pid: proc.pid, alreadyRunning: false };
     }
     await new Promise((r) => setTimeout(r, 500));
   }
@@ -153,23 +359,36 @@ export async function ensureServer(opts = {}) {
  * @returns {OpenCodeClient}
  */
 export function createClient(baseUrl, opts = {}) {
+  const apiVersion = opts.apiVersion ?? 1;
+  const prefix = apiVersion >= 2 ? "/api" : "";
+  const directory = opts.directory;
   const headers = {
     "Content-Type": "application/json",
   };
-  if (opts.directory) {
-    headers["x-opencode-directory"] = opts.directory;
+  if (directory && apiVersion < 2) {
+    headers["x-opencode-directory"] = directory;
   }
-  if (process.env.OPENCODE_SERVER_PASSWORD) {
-    const user = process.env.OPENCODE_SERVER_USERNAME ?? "opencode";
-    const cred = Buffer.from(`${user}:${process.env.OPENCODE_SERVER_PASSWORD}`).toString("base64");
-    headers["Authorization"] = `Basic ${cred}`;
+  const password = opts.password ?? process.env.OPENCODE_SERVER_PASSWORD;
+  const username = opts.username ?? process.env.OPENCODE_SERVER_USERNAME ?? "opencode";
+  const auth = basicAuthHeader(username, password);
+  if (auth) {
+    headers.Authorization = auth;
   }
 
-  async function request(method, path, body) {
+  const endpoint = (path) => `${baseUrl}${prefix}${path}`;
+
+  function unwrap(data) {
+    if (apiVersion >= 2 && data && typeof data === "object" && Object.hasOwn(data, "data")) {
+      return data.data;
+    }
+    return data;
+  }
+
+  async function request(method, path, body, requestOpts = {}) {
     const startedAt = Date.now();
     let res;
     try {
-      res = await fetch(`${baseUrl}${path}`, {
+      res = await fetch(endpoint(path), {
         method,
         headers,
         body: body != null ? JSON.stringify(body) : undefined,
@@ -185,35 +404,50 @@ export function createClient(baseUrl, opts = {}) {
         { baseUrl, startedAt, timeoutMs: REQUEST_TIMEOUT_MS, op: `request ${method} ${path}` },
       );
     }
+    if (res.status === 204) return null;
     const ct = res.headers.get("content-type") ?? "";
     if (ct.includes("application/json")) {
-      return res.json();
+      const data = await res.json();
+      return requestOpts.raw ? data : unwrap(data);
     }
     return res.text();
   }
 
   return {
     baseUrl,
+    apiVersion,
 
     // Health
-    health: () => request("GET", "/global/health"),
+    health: () => request("GET", apiVersion >= 2 ? "/info" : "/global/health"),
 
     // Sessions
     listSessions: () => request("GET", "/session"),
-    createSession: (opts = {}) => request("POST", "/session", opts),
+    createSession: (sessionOpts = {}) => {
+      const body = { ...sessionOpts };
+      if (apiVersion >= 2 && directory && !body.location) {
+        body.location = { directory };
+      }
+      if (apiVersion >= 2 && body.model) body.model = parseModelRef(body.model);
+      return request("POST", "/session", body);
+    },
     getSession: (id) => request("GET", `/session/${id}`),
     deleteSession: (id) => request("DELETE", `/session/${id}`),
-    abortSession: (id) => request("POST", `/session/${id}/abort`),
-    getSessionStatus: () => request("GET", "/session/status"),
+    abortSession: (id) => request("POST", apiVersion >= 2 ? `/session/${id}/interrupt` : `/session/${id}/abort`),
+    getSessionStatus: () => request("GET", apiVersion >= 2 ? "/session/active" : "/session/status"),
     getSessionDiff: (id) => request("GET", `/session/${id}/diff`),
 
     // Messages
     getMessages: (sessionId, opts = {}) => {
       const params = new URLSearchParams();
       if (opts.limit) params.set("limit", String(opts.limit));
-      if (opts.before) params.set("before", opts.before);
+      if (opts.before && apiVersion < 2) params.set("before", opts.before);
+      if (opts.order && apiVersion >= 2) params.set("order", opts.order);
+      if (opts.type && apiVersion >= 2) params.set("type", opts.type);
       const qs = params.toString();
-      return request("GET", `/session/${sessionId}/message${qs ? "?" + qs : ""}`);
+      return request("GET", `/session/${sessionId}/message${qs ? "?" + qs : ""}`)
+        .then((messages) => apiVersion >= 2 && Array.isArray(messages)
+          ? messages.map(normalizeV2Message)
+          : messages);
     },
 
     /**
@@ -232,6 +466,76 @@ export function createClient(baseUrl, opts = {}) {
      * we abort the hanging fetch and synthesize the response from the poll.
      */
     sendPrompt: async (sessionId, promptText, opts = {}) => {
+      if (apiVersion >= 2) {
+        if (opts.agent) {
+          await request("POST", `/session/${sessionId}/agent`, { agent: opts.agent });
+        }
+        if (opts.model) {
+          await request("POST", `/session/${sessionId}/model`, { model: parseModelRef(opts.model) });
+        }
+
+        const startedAt = Date.now();
+        const admitted = await request("POST", `/session/${sessionId}/prompt`, { text: promptText });
+        const admittedAt = Number(admitted?.time?.created || startedAt);
+
+        const deadline = startedAt + PROMPT_TIMEOUT_MS;
+        const pollMs = opts.completionPollMs ?? (Number(process.env.OPENCODE_COMPLETION_POLL_MS) || 5_000);
+        let lastSignature = "";
+        let lastActivityMs = Date.now();
+
+        while (Date.now() < deadline) {
+          let rawMessages;
+          try {
+            rawMessages = await request(
+              "GET",
+              `/session/${sessionId}/message?limit=25&order=desc`,
+            );
+          } catch (err) {
+            if (Date.now() - lastActivityMs > IDLE_TIMEOUT_MS) throw err;
+            await new Promise((r) => setTimeout(r, pollMs));
+            continue;
+          }
+
+          const messages = Array.isArray(rawMessages) ? rawMessages : [];
+          const admittedIndex = admitted?.id
+            ? messages.findIndex((message) => message?.id === admitted.id)
+            : -1;
+          const fresh = admittedIndex >= 0
+            ? messages.slice(0, admittedIndex + 1)
+            : messages.filter((m) => Number(m?.time?.created || 0) >= admittedAt);
+          const signature = JSON.stringify(fresh.map((m) => [
+            m?.id,
+            m?.type,
+            m?.time?.completed,
+            m?.finish,
+            Array.isArray(m?.content) ? m.content.length : 0,
+          ]));
+          if (signature !== lastSignature) {
+            lastSignature = signature;
+            lastActivityMs = Date.now();
+          }
+
+          const idle = fresh.find((m) => m?.type === "idle");
+          if (idle) {
+            const assistant = fresh.find((m) => m?.type === "assistant");
+            if (idle.outcome === "failed") {
+              const detail = idle.error?.message || idle.error?.name || "OpenCode session failed";
+              throw new Error(detail);
+            }
+            if (!assistant) {
+              throw new Error(`OpenCode session became ${idle.outcome} without an assistant response`);
+            }
+            return normalizeV2Message(assistant);
+          }
+
+          if (Date.now() - lastActivityMs > IDLE_TIMEOUT_MS) {
+            throw new Error(`session idle ${Math.floor((Date.now() - lastActivityMs) / 1000)}s`);
+          }
+          await new Promise((r) => setTimeout(r, pollMs));
+        }
+        throw new Error(`OpenCode prompt timed out after ${PROMPT_TIMEOUT_MS / 1000}s`);
+      }
+
       const body = {
         parts: [{ type: "text", text: promptText }],
       };
@@ -429,7 +733,16 @@ export function createClient(baseUrl, opts = {}) {
     /**
      * Send a prompt asynchronously (returns immediately).
      */
-    sendPromptAsync: (sessionId, promptText, opts = {}) => {
+    sendPromptAsync: async (sessionId, promptText, opts = {}) => {
+      if (apiVersion >= 2) {
+        if (opts.agent) {
+          await request("POST", `/session/${sessionId}/agent`, { agent: opts.agent });
+        }
+        if (opts.model) {
+          await request("POST", `/session/${sessionId}/model`, { model: parseModelRef(opts.model) });
+        }
+        return request("POST", `/session/${sessionId}/prompt`, { text: promptText });
+      }
       const body = {
         parts: [{ type: "text", text: promptText }],
       };
@@ -439,18 +752,24 @@ export function createClient(baseUrl, opts = {}) {
     },
 
     // Agents
-    listAgents: () => request("GET", "/agent"),
+    listAgents: () => request("GET", directory && apiVersion >= 2
+      ? `/agent?location%5Bdirectory%5D=${encodeURIComponent(directory)}`
+      : "/agent"),
 
     // Providers
-    listProviders: () => request("GET", "/provider"),
-    getProviderAuth: () => request("GET", "/provider/auth"),
+    listProviders: () => request("GET", directory && apiVersion >= 2
+      ? `/provider?location%5Bdirectory%5D=${encodeURIComponent(directory)}`
+      : "/provider"),
+    getProviderAuth: () => apiVersion >= 2
+      ? request("GET", "/integration")
+      : request("GET", "/provider/auth"),
 
     // Config
     getConfig: () => request("GET", "/config"),
 
     // Events (SSE) - returns a ReadableStream
     subscribeEvents: async () => {
-      const res = await fetch(`${baseUrl}/event`, {
+      const res = await fetch(endpoint("/event"), {
         headers: { ...headers, Accept: "text/event-stream" },
       });
       return res.body;
@@ -466,7 +785,21 @@ export function createClient(baseUrl, opts = {}) {
  * @returns {Promise<ReturnType<typeof createClient> & { serverInfo: object }>}
  */
 export async function connect(opts = {}) {
-  const { url } = await ensureServer(opts);
-  const client = createClient(url, { directory: opts.cwd });
-  return { ...client, serverInfo: { url } };
+  const server = await ensureServer(opts);
+  const client = createClient(server.url, {
+    directory: opts.cwd,
+    apiVersion: server.apiVersion,
+    username: server.username,
+    password: server.password,
+  });
+  return {
+    ...client,
+    serverInfo: {
+      url: server.url,
+      apiVersion: server.apiVersion,
+      version: server.version,
+      pid: server.pid,
+      source: server.source,
+    },
+  };
 }

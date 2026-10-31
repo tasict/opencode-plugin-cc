@@ -58,6 +58,8 @@ const VAGUE_PATTERNS = [
 // markers (from `companion result`). Presence of any of them means the
 // result is real and we should NOT inject the reminder.
 const REAL_RESULT_MARKERS = [
+  /"status"\s*:\s*"(?:passed|failed|blocked|error)"/,
+  /"logPath"\s*:/,
   /## Job: task-[a-z0-9-]+/i,
   /### Output/,
   /\bStatus:\s*(?:completed|failed|cancelled)/i,
@@ -70,11 +72,11 @@ const OPENCODE_MARKERS = [
   /opencode-companion\.mjs/,
   /opencode:opencode-rescue/,
   /opencode rescue/i,
-  /task-[a-z0-9]{6,}-[a-z0-9]{4,}/,
+  /task-[a-z0-9]{8,}-[a-z0-9]{6}/,
 ];
 
 // Companion task ids look like `task-moNNNNNN-NNNNNN`.
-const TASK_ID_RE = /\btask-[a-z0-9]{6,}-[a-z0-9]{4,}\b/g;
+const TASK_ID_RE = /\btask-[a-z0-9]{8,}-[a-z0-9]{6}\b/g;
 
 function resolveCompanionPath() {
   const here = fileURLToPath(import.meta.url);
@@ -96,14 +98,12 @@ function buildReminder(taskIds, companionPath) {
     "1. Status check:",
     `   node "${companionPath}" status <task-id> --json | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>{try{const j=JSON.parse(s).job||{};process.stdout.write(j.status+\"|\"+j.phase+\"|\"+j.elapsed)}catch(e){process.stdout.write(\"parse-err\")}})'`,
     "",
-    "2. If still `running`, inspect live tool-call trace (opencode-result-handling skill, Layer 2):",
-    "   `curl -s http://localhost:4096/session/<opencodeSessionId>/message | python3 ...`",
-    "   `<opencodeSessionId>` is in the status JSON's `job.opencodeSessionId`.",
+    "2. If still running, keep polling cheap status metadata. Do not fetch full logs.",
     "",
-    "3. Once status is terminal (`completed` / `failed` / `cancelled`), fetch the real result:",
+    "3. Once status is terminal (`done` / `failed`), fetch the real result:",
     `   node "${companionPath}" result <task-id>`,
     "",
-    "Only after you have the companion's rendered terminal report (contains `## Job:` + `### Output` markers) should you report back to the user.",
+    "Only after you have the companion JSON digest (contains `status` and `logPath`) should you report back to the user.",
     "</opencode-vague-notification-detected>",
   ].join("\n");
 }

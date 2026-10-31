@@ -1,8 +1,30 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, extractTaskText } from "../plugins/opencode/scripts/lib/args.mjs";
+import { parseArgs, extractTaskText, parseArgumentsInput } from "../plugins/opencode/scripts/lib/args.mjs";
+
+describe("stdin arguments", () => {
+  it("preserves contractions and quotes embedded in natural-language tokens", () => {
+    assert.deepEqual(parseArgumentsInput("fix the bug, don't crash user's file"), ["fix", "the", "bug,", "don't", "crash", "user's", "file"]);
+    assert.deepEqual(parseArgumentsInput('--model "provider/model#max" inspect foo\'bar and foo"bar'), ["--model", "provider/model#max", "inspect", "foo'bar", "and", 'foo"bar']);
+    assert.throws(() => parseArgumentsInput('--model "unterminated'), /Unterminated quote/);
+  });
+  it("preserves literal JSON argv including Windows paths and shell payloads", () => {
+    const argv = ['a "b" & c | d % é tiếng Việt', 'C:\\có dấu\\test', '$(touch injected)', ''];
+    assert.deepEqual(parseArgumentsInput(JSON.stringify(argv)), argv);
+  });
+  it("parses slash flags without evaluating shell syntax", () => {
+    assert.deepEqual(parseArgumentsInput('--model "provider/model#max" "a & b"'), ['--model','provider/model#max','a & b']);
+  });
+});
 
 describe("parseArgs", () => {
+  it("preserves unknown task flags and honors the end-of-options delimiter", () => {
+    assert.deepEqual(parseArgs(["explain", "the", "--verbose", "flag"], { booleanOptions: ["wait"] }), { options: {}, positional: ["explain", "the", "--verbose", "flag"] });
+    const argv = ["--wait", "--", "explain", "--model", "--wait"];
+    assert.deepEqual(parseArgs(argv, { booleanOptions: ["wait"], valueOptions: ["model"] }), { options: { wait: true }, positional: ["explain", "--model", "--wait"] });
+    assert.equal(extractTaskText(argv, ["model"], ["wait"]), "explain --model --wait");
+    assert.equal(extractTaskText(["explain", "--verbose", "flag"]), "explain --verbose flag");
+  });
   it("parses value options", () => {
     const { options } = parseArgs(["--base", "main", "--scope", "branch"], {
       valueOptions: ["base", "scope"],

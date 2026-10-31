@@ -23,22 +23,62 @@ import path from "node:path";
 
 import { ensureDir } from "./fs.mjs";
 import { upsertJob, jobDataPath } from "./state.mjs";
+import { findRunningServer } from "./opencode-server.mjs";
 
-const DEFAULT_BASE_URL = "http://127.0.0.1:4096";
 const STRICT_TERMINAL = process.env.OPENCODE_STRICT_TERMINAL === "1";
 // A worker/session can be legitimately silent for a while (big model thinking,
 // slow tool) — only declare it dead after >60s of no session activity AND no
 // live task-worker process. 60s matches the spec.
 const STALE_IDLE_MS = 60_000;
 
-function buildHeaders() {
+function buildHeaders(password, username = "opencode") {
   const headers = { "Content-Type": "application/json" };
-  if (process.env.OPENCODE_SERVER_PASSWORD) {
-    const user = process.env.OPENCODE_SERVER_USERNAME ?? "opencode";
-    const cred = Buffer.from(`${user}:${process.env.OPENCODE_SERVER_PASSWORD}`).toString("base64");
+  const resolvedPassword = password ?? process.env.OPENCODE_SERVER_PASSWORD;
+  if (resolvedPassword) {
+    const user = username ?? process.env.OPENCODE_SERVER_USERNAME ?? "opencode";
+    const cred = Buffer.from(`${user}:${resolvedPassword}`).toString("base64");
     headers["Authorization"] = `Basic ${cred}`;
   }
   return headers;
+}
+
+async function resolveProbeTarget(baseUrl, headers) {
+  if (baseUrl && headers) {
+    for (const [apiVersion, infoPath] of [[2, "/api/info"], [1, "/global/health"]]) {
+      try {
+        const res = await fetch(`${baseUrl}${infoPath}`, {
+          headers,
+          signal: AbortSignal.timeout(3_000),
+        });
+        const contentType = res.headers.get("content-type") ?? "";
+        if (res.ok && contentType.includes("application/json")) {
+          await res.json();
+          return { baseUrl, apiVersion, headers };
+        }
+      } catch {
+        // Try the other API generation.
+      }
+    }
+  }
+
+  let server = null;
+  if (baseUrl) {
+    server = await findRunningServer({ url: baseUrl });
+  }
+  if (!server) server = await findRunningServer();
+  if (!server) return null;
+  return {
+    baseUrl: server.url,
+    apiVersion: server.apiVersion,
+    headers: headers ?? buildHeaders(server.password, server.username),
+  };
+}
+
+function v2Text(message) {
+  return (message?.content ?? [])
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n");
 }
 
 /**
@@ -87,11 +127,40 @@ function extractPartsText(parts) {
  * @param {object} [headers]
  */
 export async function probeSessionTerminal(baseUrl, sessionId, startedAtMs, headers) {
-  const h = headers ?? buildHeaders();
   try {
+    const target = await resolveProbeTarget(baseUrl, headers);
+    if (!target) return { terminal: false, reachable: false, error: "server unreachable" };
+
+    if (target.apiVersion >= 2) {
+      const res = await fetch(
+        `${target.baseUrl}/api/session/${sessionId}/message?limit=25&order=desc`,
+        { method: "GET", headers: target.headers, signal: AbortSignal.timeout(10_000) },
+      );
+      if (!res.ok) return { terminal: false, reachable: true, error: `HTTP ${res.status}` };
+      const payload = await res.json();
+      const messages = Array.isArray(payload?.data) ? payload.data : [];
+      const fresh = messages.filter((m) => Number(m?.time?.created || 0) >= (startedAtMs || 0));
+      const idle = fresh.find((m) => m?.type === "idle");
+      const assistant = fresh.find((m) => m?.type === "assistant");
+      const lastUpdatedAt = Math.max(0, ...messages.map((m) =>
+        Math.max(Number(m?.time?.completed || 0), Number(m?.time?.created || 0))));
+
+      if (idle && assistant) {
+        return {
+          terminal: true,
+          finish: assistant.finish ?? idle.outcome,
+          completed: Number(idle.time?.created || assistant.time?.completed || lastUpdatedAt),
+          text: v2Text(assistant),
+          info: assistant,
+        };
+      }
+      return { terminal: false, reachable: true, lastUpdatedAt, lastInfo: assistant ?? idle ?? null };
+    }
+
+    const h = target.headers;
     // limit=1 → last message only. On glm-5 / opencode 1.4.x this returns
     // an array of { info, parts } objects.
-    const res = await fetch(`${baseUrl}/session/${sessionId}/message?limit=1`, {
+    const res = await fetch(`${target.baseUrl}/session/${sessionId}/message?limit=1`, {
       method: "GET",
       headers: h,
       signal: AbortSignal.timeout(10_000),
@@ -148,16 +217,31 @@ export async function probeSessionTerminal(baseUrl, sessionId, startedAtMs, head
  */
 export async function getSessionLastActivity(baseUrl, sessionId) {
   if (!sessionId) return null;
-  const h = buildHeaders();
   try {
-    const res = await fetch(`${baseUrl}/session/${sessionId}/message?limit=1`, {
+    const target = await resolveProbeTarget(baseUrl);
+    if (!target) return null;
+    const requestPath = target.apiVersion >= 2
+      ? `/api/session/${sessionId}/message?limit=10&order=desc`
+      : `/session/${sessionId}/message?limit=1`;
+    const res = await fetch(`${target.baseUrl}${requestPath}`, {
       method: "GET",
-      headers: h,
+      headers: target.headers,
       signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) return null;
-    const arr = await res.json();
-    const last = Array.isArray(arr) ? arr[arr.length - 1] : null;
+    const payload = await res.json();
+    const arr = target.apiVersion >= 2 ? payload?.data : payload;
+    const raw = Array.isArray(arr)
+      ? (target.apiVersion >= 2 ? arr[0] : arr[arr.length - 1])
+      : null;
+    const last = target.apiVersion >= 2 && raw
+      ? {
+          info: { ...raw, role: raw.type },
+          parts: Array.isArray(raw.content)
+            ? raw.content.map((part) => ({ ...part, tool: part.tool ?? part.name }))
+            : [],
+        }
+      : raw;
     if (!last) return null;
     const info = last.info;
     const parts = Array.isArray(last.parts) ? last.parts : [];
@@ -213,7 +297,7 @@ function toEpochMs(v) {
  * @param {boolean} [opts.dryRun] - when true, do not write state; return `{job, action, details}`
  */
 export async function autoHealJob(workspace, job, opts = {}) {
-  const baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
+  const baseUrl = opts.baseUrl;
   const dryRun = !!opts.dryRun;
   const HEALABLE = new Set(["starting", "investigating", "running", "finalizing"]);
 

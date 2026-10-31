@@ -172,7 +172,7 @@ export function renderSetup(status) {
   if (status.providers?.length > 0) {
     lines.push(`- **Configured Providers**: ${status.providers.join(", ")}`);
   } else if (status.installed) {
-    lines.push(`- **Providers**: None configured. Run \`!opencode providers\` to set up.`);
+    lines.push(`- **Providers**: Not discovered. Check \`!opencode auth list\` and \`!opencode models\`; authenticate with \`!opencode auth login\`.`);
   }
   if (status.reviewGate !== undefined) {
     lines.push(`- **Review Gate**: ${status.reviewGate ? "Enabled" : "Disabled"}`);

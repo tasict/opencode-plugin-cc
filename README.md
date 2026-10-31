@@ -11,273 +11,124 @@ Use OpenCode from inside Claude Code for code reviews or to delegate tasks.
 This plugin is for Claude Code users who want an easy way to start using OpenCode from the workflow
 they already have.
 
-## Quickstart
-
-```bash
-# 1. Install opencode (once)
-npm i -g opencode-ai   # or: brew install opencode
-
-# 2. Install the plugin (see Install section below)
-
-# 3. Run the self-test — fixes common footguns for you
-node ~/.claude/plugins/cache/tasict-opencode-plugin-cc/opencode/1.1.0/scripts/opencode-companion.mjs doctor --fix
-```
-
-Then delegate a task from Claude Code:
-
-```
-/opencode:rescue grep for XXX in src/ and summarize
-```
-
-`doctor --fix` writes the correct `~/.config/opencode/opencode.json` permissions so the
-bash tool does not hang in headless mode (sst/opencode#14473). This is the single biggest
-footgun for newcomers — `ensureServer` will also run this fix automatically on first use.
-
-## What You Get
-
-- `/opencode:review` for a normal read-only OpenCode review
-- `/opencode:adversarial-review` for a steerable challenge review
-- `/opencode:rescue`, `/opencode:status`, `/opencode:result`, and `/opencode:cancel` to delegate work and manage background jobs
-
-## Requirements
-
-- [Claude Code](https://claude.com/claude-code) (CLI, desktop app, or IDE extension)
-- [OpenCode](https://github.com/anomalyco/opencode) installed (`npm i -g opencode-ai` or `brew install opencode`)
-- A configured AI provider in OpenCode (Claude, OpenAI, Google, etc.)
-- Node.js 18.18 or later
-
 ## Install
 
-Inside Claude Code, run:
+Requires Claude Code, Node.js 24 on Windows, and an authenticated OpenCode CLI.
+OpenCode 1 and 2 transports are supported; the real Windows smoke uses v2.1.4.
 
-```
-! curl -fsSL https://raw.githubusercontent.com/tasict/opencode-plugin-cc/main/install.sh | bash
+```bash
+npm install -g @opencode/cli
 ```
 
-Then reload the plugin:
+Inside Claude Code:
 
-```
+```text
+! curl -fsSL https://raw.githubusercontent.com/NguyenCong2k/opencode-plugin-cc/main/install.sh | bash
 /reload-plugins
-```
-
-You should see:
-
-```
-Reloaded: 1 plugin · 7 skills · 6 agents · 3 hooks ...
-```
-
-Finally, verify your setup:
-
-```
 /opencode:setup
 ```
 
-> **What the installer does**: Clones the repo to `~/.claude/plugins/marketplaces/`,
-> caches the plugin files, and registers it in Claude Code's plugin config.
-> It tries SSH first and falls back to HTTPS automatically.
+Authenticate with `opencode auth login`; inspect credentials with `opencode auth
+list` and available models with `opencode models`. Setup falls back to those CLI
+commands when no HTTP service is available. An absent service does not imply
+missing provider credentials.
 
-### Set up an AI Provider
+## Delegate
 
-If OpenCode is installed but no AI provider is configured, set one up:
-
-```
-! opencode providers login
-```
-
-To check your configured providers:
-
-```
-! opencode providers list
+```text
+/opencode:rescue --full-access --worktree feature/hello --model opencode-go/deepseek-v4.1-flash#max create hello.txt and run git status
 ```
 
-### Uninstall
+All task and review jobs return a compact JSON digest. Background launches
+return `jobId`, PID and log path. `status <job-id> --json` reads local metadata
+only: `running|done|failed`, PID, agent PID and `lastOutputAt`. `result <job-id>`
+returns the saved digest. Full transcripts stay in `logPath`.
 
-```
-/plugin uninstall opencode@tasict-opencode-plugin-cc
-/reload-plugins
-```
+For human-readable output, use `review --text`, `adversarial-review --text`, or
+`status [job-id] --text`. JSON remains the default; `--json` takes precedence.
+Review digests retain up to 8,000 characters in `reviewOutput`, with
+`reviewOutputTruncated` indicating whether the full log contains more.
 
-## Command Mapping (codex-plugin-cc -> opencode-plugin-cc)
+| Command | Purpose |
+| --- | --- |
+| `/opencode:rescue` | Delegate work through the thin forwarder |
+| `/opencode:review` | Read-only code review |
+| `/opencode:adversarial-review` | Focused adversarial review |
+| `/opencode:status` | Cheap local job metadata |
+| `/opencode:result` | Final JSON digest |
+| `/opencode:cancel` | Stop an owned process tree and save a failure digest |
+| `/opencode:setup` | Provider discovery and userConfig choices |
 
-| codex-plugin-cc | opencode-plugin-cc | Description |
-|---|---|---|
-| `/codex:review` | `/opencode:review` | Read-only code review |
-| `/codex:adversarial-review` | `/opencode:adversarial-review` | Adversarial challenge review |
-| `/codex:rescue` | `/opencode:rescue` | Delegate tasks to external agent |
-| `/codex:status` | `/opencode:status` | Show running/recent jobs |
-| `/codex:result` | `/opencode:result` | Show finished job output |
-| `/codex:cancel` | `/opencode:cancel` | Cancel active background job |
-| `/codex:setup` | `/opencode:setup` | Check install/auth, toggle review gate |
+## Access and configuration
 
-## Slash Commands
+Full access defaults off. Opt in per job with `--full-access`, or persist a
+workspace userConfig choice with `/opencode:setup --full-access true`. Persisted
+settings are `full_access` and `repair_config` in companion workspace state.
+`--no-full-access` overrides the saved choice for one job.
 
-- `/opencode:review` -- Normal OpenCode code review (read-only). Supports `--base <ref>`, `--wait`, `--background`.
-- `/opencode:adversarial-review` -- Steerable review that challenges implementation and design decisions. Accepts custom focus text.
-- `/opencode:rescue` -- Delegates a task to OpenCode via the `opencode:opencode-rescue` subagent. Supports `--model`, `--agent`, `--resume`, `--fresh`, `--background`.
-- `/opencode:status` -- Shows running/recent OpenCode jobs for the current repo.
-- `/opencode:result` -- Shows final output for a finished job, including OpenCode session ID for resuming.
-- `/opencode:cancel` -- Cancels an active background OpenCode job.
-- `/opencode:setup` -- Checks OpenCode install/auth, can enable/disable the review gate hook.
+OpenCode 2 full access uses a private `run --standalone --auto` process after
+checking CLI capabilities, effective config sources and the selected agent.
+Required tool deny rules or tool policies cause a startup error; policy changes
+or denials during execution produce a blocked digest. The host user supplies
+filesystem, loopback/network and process authority. OS and managed policy
+restrictions cannot be bypassed. No permission mode is silently downgraded.
+Normal v2 jobs use the managed service unless `--standalone` is chosen. HTTP
+clients discover service registration, `OPENCODE_SERVER_URL`, configured
+`server.port`, or `OPENCODE_SERVER_PORT`; there is no fixed service port.
 
-## Review Gate
+OpenCode 1 full access supports the build agent and sets job-local
+`OPENCODE_PERMISSION`. Legacy global permission repair remains available only
+when explicitly using full access (or `doctor --fix`). It backs up existing
+config bytes first, preserves unrelated keys and reports changes plus backup
+paths in `configChanges`. Disable it with `--no-repair-config`, or persist
+`/opencode:setup --repair-config false`. Malformed JSON is rejected, preserved
+and never replaced with a blank config.
 
-When enabled via `/opencode:setup --enable-review-gate`, a Stop hook runs a targeted OpenCode review on Claude's response. If issues are found, the stop is blocked so Claude can address them first. Warning: can create long-running loops and drain usage limits.
+`--worktree <branch>` creates an isolated Git worktree, using an existing branch
+when available. Worktrees remain for review and manual merge/removal. The default
+root is the OS temp directory under `opencode-worktrees`; override with
+`OPENCODE_WORKTREE_ROOT`. Keeping this root short avoids Git for Windows path
+limits. Jobs normalize logical PWD to the worktree. Clean worktrees are removed
+after completion, startup failure, or cancellation. Dirty worktrees retain all
+output and are reused by the next job requesting that branch; active jobs cannot
+share one. If Git refuses cleanup, the worktree is also retained for reuse.
+The digest reports `worktreeStatus` (`removed` or `retained`).
 
-## Job Auto-Heal
+`--incident-log <path>` or `OPENCODE_INCIDENT_LOG` appends UTC Markdown entries
+for failures, blocked requests, timeouts and owned process termination.
+`--timeout-ms <number>` limits the agent run. Provider and permission probes
+also have deadlines. Cancellation does not stop a shared service.
 
-Long-running tasks spawned via `/opencode:task --background` occasionally get
-stuck in `investigating` status even after the OpenCode session has finished
-server-side — typically because `POST /session/:id/message` fails to close its
-HTTP body, the task-worker is killed, or the companion's watcher misses the
-terminal signal.
+## Automation contract
 
-The companion now reconciles this automatically:
+Pass arbitrary text through `--prompt-file` or `--arguments-stdin`. Stdin accepts
+a JSON argv array, preserving literal quotes, newlines and Unicode. Slash
+commands use a quoted heredoc with a unique delimiter absent from the data;
+never interpolate raw user text into shell command strings. Windows npm
+launchers resolve to a native executable or Node entry point with `shell:false`.
 
-- `companion.mjs status` and `companion.mjs result` run a silent auto-heal
-  pass before they read state, so they never report a false "running" state
-  for a session that is actually complete.
-- `companion.mjs heal` scans for stuck jobs and reconciles them in bulk. Pass
-  `--dry-run` to preview, `--json` for machine-readable output, and `--all`
-  to include jobs from other Claude sessions.
-
-Each heal check queries `GET /session/:id/message?limit=1`. If the last
-assistant message has `info.finish` set and `info.time.completed >= job.startedAt`,
-the job is transitioned to `completed` and the message text is persisted to
-the job data file. If the task-worker PID is dead and the session has been
-silent for >60 s, the job is transitioned to `failed` with a clear reason.
-
-If the OpenCode server is unreachable, auto-heal is a no-op — status/result
-commands still work, they just can't move stuck jobs forward until the server
-comes back.
-
-## Environment variables
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `OPENCODE_REQUEST_TIMEOUT_MS` | `1800000` | Per-HTTP-request abort timeout |
-| `OPENCODE_PROMPT_TIMEOUT_MS` | `14400000` | `sendPrompt` absolute cap (races the 5-min server body-close) |
-| `OPENCODE_IDLE_TIMEOUT_MS` | `900000` | Session idle watchdog — no activity for this long → abort |
-| `OPENCODE_PGREP_MISS_THRESHOLD` | `3` | Consecutive pgrep-misses before declaring a stuck bash tool |
-| `OPENCODE_COMPLETION_POLL_MS` | `5000` | Watcher poll interval during `sendPrompt` |
-| `OPENCODE_COMPANION_DATA` | (self-derived) | Override for plugin data dir (otherwise derived from script path) |
-| `OPENCODE_MONITOR_RESULT_CHARS` | (hook default) | Monitor hook: max chars per tool-result snippet |
-| `OPENCODE_MONITOR_HEARTBEAT_POLLS` | (hook default) | Monitor hook: polls between heartbeats |
-| `OPENCODE_SERVER_PASSWORD` | (unset) | HTTP Basic auth password for `opencode serve` |
-| `OPENCODE_SERVER_USERNAME` | `opencode` | HTTP Basic auth username |
-
-Run `companion.mjs config` to see resolved values with source (env vs default).
-
-## Pitfalls
-
-- **`companion status` stuck on `investigating`** — run `companion heal` (or wait; `status`/`result` auto-heal on every call).
-- **Bash tool hangs for minutes** — run `companion doctor --fix` to merge the required `permission.*=allow` keys into `~/.config/opencode/opencode.json`. This is sst/opencode#14473 in headless mode.
-- **`CLAUDE_PLUGIN_DATA` points at another plugin** — harmless: the companion self-derives its own data dir from `import.meta.url`. `doctor` will print a WARN so you know.
-
-## Troubleshooting
-
-<details>
-<summary><strong>Plugin not loading after install (0 plugins)</strong></summary>
-
-1. Re-run the installer: `! curl -fsSL https://raw.githubusercontent.com/tasict/opencode-plugin-cc/main/install.sh | bash`
-2. Run `/reload-plugins` again.
-3. If still failing, restart Claude Code.
-</details>
-
-<details>
-<summary><strong>Install script fails to clone</strong></summary>
-
-The script tries SSH first, then HTTPS. If both fail:
-
-- Check your network connection
-- For SSH: ensure `ssh -T git@github.com` works
-- For HTTPS: run `gh auth login` to set up credentials
-</details>
-
-<details>
-<summary><strong>OpenCode commands not working</strong></summary>
-
-1. Verify OpenCode is installed: `! opencode --version`
-2. Verify a provider is configured: `! opencode providers list`
-3. Run `/opencode:setup` to check the full status.
-</details>
-
-## Architecture
-
-Unlike codex-plugin-cc which uses JSON-RPC over stdin/stdout, this plugin communicates with
-OpenCode via its HTTP REST API + Server-Sent Events (SSE) for streaming. The server is automatically
-started and managed by the companion scripts.
-
-```
-codex-plugin-cc                          opencode-plugin-cc
-+----------------------+                 +------------------------+
-| JSON-RPC over stdio  |                 | HTTP REST + SSE        |
-| codex app-server     |      vs.        | opencode serve         |
-| Broker multiplexing  |                 | Native HTTP (no broker)|
-| codex CLI binary     |                 | opencode CLI binary    |
-+----------------------+                 +------------------------+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --background --arguments-stdin <<'OC_ARGS_7db82a'
+["--full-access", "--worktree", "feature/hello", "create hello.txt and run git status"]
+OC_ARGS_7db82a
 ```
 
-## Project Structure
+Digest fields: `status` (`passed|failed|blocked|error`), `filesChanged`,
+`commandsRun` (command and actual exit code), `testsSummary`, `failures`
+(at most 40 verbatim lines), `logPath`, `worktreePath`, `configChanges`.
+Unknown tool exit codes remain null. Changed files combine Git observations
+with successful write/edit tool events, including external paths.
 
-```
-opencode-plugin-cc/
-├── .claude-plugin/marketplace.json       # Marketplace registration
-├── install.sh                            # One-line installer
-├── plugins/opencode/
-│   ├── .claude-plugin/plugin.json        # Plugin metadata
-│   ├── agents/opencode-rescue.md         # Rescue subagent definition
-│   ├── commands/                         # 7 slash commands
-│   │   ├── review.md
-│   │   ├── adversarial-review.md
-│   │   ├── rescue.md
-│   │   ├── status.md
-│   │   ├── result.md
-│   │   ├── cancel.md
-│   │   └── setup.md
-│   ├── hooks/hooks.json                  # Lifecycle hooks
-│   ├── prompts/                          # Prompt templates
-│   ├── schemas/                          # Output schemas
-│   ├── scripts/                          # Node.js runtime
-│   │   ├── opencode-companion.mjs        # CLI entry point
-│   │   ├── session-lifecycle-hook.mjs
-│   │   ├── stop-review-gate-hook.mjs
-│   │   └── lib/                          # Core modules
-│   │       ├── opencode-server.mjs       # HTTP API client
-│   │       ├── state.mjs                 # Persistent state
-│   │       ├── job-control.mjs           # Job management
-│   │       ├── tracked-jobs.mjs          # Job lifecycle tracking
-│   │       ├── render.mjs               # Output rendering
-│   │       ├── prompts.mjs              # Prompt construction
-│   │       ├── git.mjs                  # Git utilities
-│   │       ├── process.mjs             # Process utilities
-│   │       ├── args.mjs                # Argument parsing
-│   │       ├── fs.mjs                  # Filesystem utilities
-│   │       └── workspace.mjs           # Workspace detection
-│   └── skills/                          # Internal skills
-├── tests/                               # Test suite
-├── LICENSE                              # Apache License 2.0
-├── NOTICE                               # Attribution notice
-└── README.md
-```
+`provider/model#variant` is preserved in foreground and background jobs. Model
+existence is checked before inference. Budget/quota failures retain the original
+error and suggest another discovered provider for the same model when available.
 
-## OpenCode Integration
+Use `heal` explicitly for legacy HTTP jobs; status polling never fetches logs.
+`wait-and-result` supports older automation and returns the same saved digest.
 
-Wraps the OpenCode HTTP server API. Picks up config from:
-- User-level: `~/.config/opencode/config.json`
-- Project-level: `.opencode/opencode.jsonc`
+## Development
 
-## License
-
-Copyright 2026 OpenCode Plugin Contributors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+Run `npm test` in PowerShell and Git Bash. Tests include Windows metacharacters,
+Vietnamese paths, provider fallback, v1/v2 HTTP compatibility, model routing,
+full-access policy checks, backups, worktrees, concurrent state updates,
+background status/results, cancellation, incident recording and bounded digests.

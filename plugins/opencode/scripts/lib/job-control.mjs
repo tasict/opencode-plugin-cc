@@ -32,7 +32,7 @@ export function enrichJob(job, workspacePath) {
   }
 
   // Progress preview from log tail
-  if (job.status === "running") {
+  if (job.status === "running" && job.runtime !== "cli") {
     const logFile = jobLogPath(workspacePath, job.id);
     const lines = tailLines(logFile, 3);
     if (lines.length > 0) {
@@ -85,8 +85,8 @@ export function buildStatusSnapshot(jobs, workspacePath, opts = {}) {
   const sorted = sortJobsNewestFirst(filtered);
   const enriched = sorted.map((j) => enrichJob(j, workspacePath));
 
-  const running = enriched.filter((j) => j.status === "running");
-  const finished = enriched.filter((j) => j.status !== "running");
+  const running = enriched.filter((j) => ["pending", "queued", "running"].includes(j.status));
+  const finished = enriched.filter((j) => !["pending", "queued", "running"].includes(j.status));
   const latestFinished = finished[0] ?? null;
   const recent = finished.slice(0, 5);
 
@@ -136,7 +136,7 @@ export function resolveResultJob(jobs, ref) {
  * @returns {{ job: object|null, ambiguous: boolean }}
  */
 export function resolveCancelableJob(jobs, ref) {
-  const running = jobs.filter((j) => j.status === "running");
+  const running = jobs.filter((j) => ["pending", "queued", "running"].includes(j.status));
   if (!ref) {
     return { job: running[0] ?? null, ambiguous: running.length > 1 };
   }

@@ -42,9 +42,9 @@ export function classifyError(err, ctx = {}) {
 
   // Connection refused — server not listening.
   if (code === "ECONNREFUSED" || /ECONNREFUSED/.test(msg)) {
-    const url = ctx.baseUrl || "http://127.0.0.1:4096";
+    const url = ctx.baseUrl || "the configured OpenCode service";
     return annotate(original,
-      `OpenCode server at ${url} unreachable. Start it with 'opencode serve --port 4096' or run 'companion doctor'.`);
+      `OpenCode server at ${url} unreachable. Run 'opencode service start' (OpenCode 2) or 'companion doctor'.`);
   }
 
   // HTTP status-coded errors (shape: "OpenCode API GET /foo returned 401: ...")

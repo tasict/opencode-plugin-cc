@@ -2,10 +2,12 @@
 // Mirrors the codex-plugin-cc state.mjs pattern: SHA-256 hash of workspace path,
 // JSON state file, per-job files and logs.
 
-import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDir, readJson, writeJson } from "./fs.mjs";
+import { workspaceKey } from "./workspace-key.mjs";
 
 const MAX_JOBS = 50;
 
@@ -61,10 +63,10 @@ export function stateRoot(workspacePath) {
     } else if (envData && /opencode/i.test(path.basename(envData))) {
       base = path.join(envData, "state");
     } else {
-      base = path.join("/tmp", "opencode-companion");
+      base = path.join(os.tmpdir(), "opencode-companion");
     }
   }
-  const hash = crypto.createHash("sha256").update(workspacePath).digest("hex").slice(0, 16);
+  const hash = workspaceKey(workspacePath);
   return path.join(base, hash);
 }
 
@@ -105,10 +107,33 @@ export function saveState(workspacePath, state) {
  * @returns {object} the updated state
  */
 export function updateState(workspacePath, mutator) {
-  const state = loadState(workspacePath);
-  mutator(state);
-  saveState(workspacePath, state);
-  return state;
+  const root = stateRoot(workspacePath);
+  ensureDir(root);
+  const lock = path.join(root, "state.lock");
+  const deadline = Date.now() + 10_000;
+  let fd;
+  while (fd === undefined) {
+    try { fd = fs.openSync(lock, "wx"); fs.writeFileSync(fd, String(process.pid)); }
+    catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      // Recover a lock left by a terminated worker, never steal a live lock.
+      try {
+        const owner = Number(fs.readFileSync(lock, "utf8"));
+        if (owner > 0) {
+          try { process.kill(owner, 0); }
+          catch (probe) { if (probe.code === "ESRCH") { fs.unlinkSync(lock); continue; } }
+        }
+      } catch {}
+      if (Date.now() >= deadline) throw new Error(`State lock timed out: ${lock}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+  try {
+    const state = loadState(workspacePath);
+    mutator(state);
+    saveState(workspacePath, state);
+    return state;
+  } finally { fs.closeSync(fd); fs.unlinkSync(lock); }
 }
 
 /**

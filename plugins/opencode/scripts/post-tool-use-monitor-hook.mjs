@@ -27,12 +27,13 @@ function readHookInput() {
 }
 
 // Companion task ids look like `task-moNNNNNN-NNNNNN`.
-const TASK_ID_RE = /\btask-[a-z0-9]{6,}-[a-z0-9]{4,}\b/g;
+const TASK_ID_RE = /\btask-[a-z0-9]{8,}-[a-z0-9]{6}\b/g;
 
 // Only react to responses that are unambiguously from the opencode companion,
 // to avoid false positives on arbitrary text containing a task-like token.
 const OPENCODE_MARKERS = [
   /OpenCode task started/i,
+  /"jobId"\s*:\s*"task-/,
   /opencode-companion\.mjs/,
   /opencode:opencode-rescue/,
   /opencode rescue/i,
@@ -68,9 +69,9 @@ function buildMonitorScript(ids, companionPath) {
   //  - exits when every tracked id is terminal
   return [
     "set -u",
-    `COMP=${JSON.stringify(companionPath)}`,
+    `COMP='${companionPath.replaceAll("'", "'\\''")}'`,
     `IDS=(${quoted})`,
-    "RESULT_MAX_CHARS=${OPENCODE_MONITOR_RESULT_CHARS:-1500}",
+    "RESULT_MAX_CHARS=${OPENCODE_MONITOR_RESULT_CHARS:-16000}",
     "HEARTBEAT_POLLS=${OPENCODE_MONITOR_HEARTBEAT_POLLS:-10}",
     "MAX_POLLS=${OPENCODE_MONITOR_MAX_POLLS:-120}",
     "declare -A prev",
@@ -108,7 +109,7 @@ function buildMonitorScript(ids, companionPath) {
     "      fi",
     "    fi",
     '    case "$st" in',
-    "      completed|failed|cancelled)",
+    "      done|completed|failed|cancelled)",
     '        if [ "${terminal[$id]}" -eq 0 ]; then',
     '          result=$(node "$COMP" result "$id" 2>/dev/null || true)',
     "          # Truncate defensively so Monitor output stays bounded.",
